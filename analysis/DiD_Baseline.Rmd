@@ -1,0 +1,78 @@
+---
+title: "DiD_Baseline"
+output: html_document
+date: "2023-07-06"
+---
+
+# Difference-in-Difference (Baseline)
+
+This file will do the analysis for the first baseline analysis which is the Leicester Local LD only.
+
+
+# Installing Necessary Packages
+
+```{r}
+suppressMessages(library(dplyr))
+suppressMessages(library(tidyr))
+suppressMessages(library(ggplot2))
+suppressMessages(library(lubridate))
+suppressMessages(library(did))
+suppressMessages(library(plm))
+```
+
+
+# Setting Up the data
+## Dropped data
+```{r}
+df_drop <- read.csv("/Users/nooboo/Desktop/LSE/MY498/data/df_DiD.csv")
+
+df_depress_idx <- df_drop %>% 
+  select(record_id, depression_index,
+         days_since_min_date, D, G) %>%
+  filter(days_since_min_date>=85)
+
+df_depress_idx
+```
+
+
+# Parallel trends (Pre-trends)
+
+DiD model need to follow the parallel trends assumption and we would check that using the pre-trends.
+
+## Lead-Lag Plot
+```{r}
+out <- att_gt(yname  ="depression_index",
+              gname  ="G",
+              idname ="record_id",
+              tname  ="days_since_min_date",
+              xformla = ~1,
+              data   = df_depress_idx,
+              est_method = "reg",
+              panel  = FALSE
+              )
+
+ggdid(out)
+
+```
+
+
+```{r}
+es <- aggte(out, type="dynamic")
+
+ggdid(es)
+```
+
+
+## Statistical Testing
+```{r}
+
+```
+
+
+
+
+
+
+
+
+

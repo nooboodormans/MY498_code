@@ -1,0 +1,124 @@
+---
+title: "Counterfactual_Estiamtors"
+output: html_document
+date: "2023-07-01"
+---
+
+# Installations
+```{r}
+devtools::install_github('xuyiqing/fastplm', force=TRUE)
+devtools::install_github('xuyiqing/fect', force=TRUE)
+devtools::install_github('xuyiqing/panelview', force=TRUE)
+```
+
+```{r}
+install.packages('fect')
+```
+
+
+```{r}
+## for processing C++ code
+require(Rcpp) 
+## for plotting
+require(ggplot2)  
+require(GGally) 
+require(grid)
+require(gridExtra)
+## for parallel computing
+require(foreach)
+require(future)  
+require(doParallel) 
+require(abind)
+require(panelView)
+require(patchwork)
+require(fect)
+```
+
+
+```{r}
+library(panelView)
+library(patchwork)
+suppressMessages(library(lubridate))
+
+load("/Users/nooboo/Desktop/LSE/MY498/data/fect.RData")
+
+set.seed(1234)
+ls()
+
+panelview(Y ~ D, data = simdata, index = c("id","time"), 
+  axis.lab = "time", xlab = "Time", ylab = "Unit", 
+  background = "white", main = "Simulated Data: Treatment Status")
+
+df_DiD <- read.csv("/Users/nooboo/Desktop/LSE/MY498/df_DiD.csv")
+```
+
+```{r}
+# We would have to make a column for treatment
+# df_DiD_temp <- df_DiD %>% 
+#   mutate(D = 
+#            case_when())
+```
+
+
+```{r}
+simdata
+```
+
+```{r}
+df_NA <- df_DiD[!complete.cases(df_DiD), ]
+df_NA
+
+panelview(depression_index ~ D, data=df_DiD, index=c("record_id", "date"))
+```
+
+```{r}
+simdata
+```
+
+
+```{r}
+panelview(Y ~ D, data = simdata, index = c("id","time"), 
+  axis.lab = "time", xlab = "Time", ylab = "Unit", 
+  theme.bw = TRUE, type = "outcome", main = "Simulated Data: Outcome")
+```
+
+
+```{r}
+out.fect <- fect(Y ~ D + X1 + X2, data = simdata, index = c("id","time"), 
+  method = "fe", force = "two-way")
+```
+
+
+```{r}
+plot(out.fect, main = "Estimated ATT (FEct)", ylab = "Effect of D on Y", 
+  cex.main = 0.8, cex.lab = 0.8, cex.axis = 0.8)
+```
+
+
+```{r}
+out.fect <- fect(Y ~ D + X1 + X2, data = simdata, index = c("id","time"), 
+  method = "fe", force = "two-way", se = TRUE, parallel = TRUE, nboots = 200)
+```
+
+```{r}
+plot(out.fect, main = "Estimated ATT (FEct)", ylab = "Effect of D on Y", 
+  cex.main = 0.8, cex.lab = 0.8, cex.axis = 0.8)
+```
+
+```{r}
+print(out.fect)
+```
+```{r}
+simdata
+```
+
+
+```{r}
+
+
+
+```
+
+
+
+

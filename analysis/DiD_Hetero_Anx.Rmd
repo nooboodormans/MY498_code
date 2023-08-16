@@ -1,0 +1,1062 @@
+---
+title: "R Data Preprocessing"
+subtitle: "Difference in Differences Setup"
+author: ""
+date: ''
+output:
+  pdf_document: default
+  html_document: default
+---
+# Setup
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,warning=F,message=F}
+# read in required packages
+# install.packages("plm") # Uncomment and run (once) if not already installed
+# ... similarly for the other packages if needed
+
+library(huxtable)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(markdown)
+library(plm)
+library(did)
+library(stargazer)
+library(fixest)
+```
+
+
+```{r}
+# read the data
+df_bl <- read.csv("../data/baseline.csv")
+df_sv <- read.csv("../data/survey.csv")
+```
+
+```{r}
+# define each columns
+sv_column <- list('record_id', 'wave', 'wave_name', 'date',  ## Data info
+                 'soc1', 'soc2', 'soc3', 'soc4', 
+                 'phq1', 'phq2', 'phq3', 'phq4', 'phq5', 'phq6', 'phq7', 'phq8', 'phq9', ## depression index
+                 'gad1', 'gad2', 'gad3', 'gad4','gad5', 'gad6','gad7') ## Anxiety index
+
+df_sv_mod <- df_sv %>% select(!!! sv_column)
+df_sv_mod_filtered <- df_sv_mod %>% filter(!is.na(date) & date != " " & !is.na(soc1)) 
+
+df_sv_mod_filtered$date <- as.Date(df_sv_mod_filtered$date, format="%m/%d/%Y")
+df_sv_comp <- df_sv_mod_filtered %>% 
+  mutate(dps_idx = phq1 + phq2 + phq3 + phq4 + phq5 + phq6 + phq7 + phq8 + phq9,
+         axy_idx = gad1 + gad2 + gad3 + gad4 + gad5 + gad6 + gad7) %>%
+  select(-starts_with("phq"),
+         -starts_with("gad"))
+
+df_sv_hm <- df_sv_comp %>% 
+  select(-c(wave, wave_name, soc1, soc2, soc3, soc4))
+
+df_bl_region <- df_bl[!is.na(df_bl$region), ] %>%
+  filter(country==1) %>%
+  select(-starts_with("keyworker"), 
+         -starts_with("garden"), 
+         -starts_with("illness"),
+         -starts_with("pets"),
+         -starts_with("caring"),
+         -c(country)) %>%
+  mutate(LocalLD=case_when(
+    region %in% c(2, 3, 5, 6) ~ 1,
+    TRUE ~ 0
+      )
+    )
+df_bl_region %>% filter(LocalLD==1) %>% nrow()
+df_bl_region %>% filter(LocalLD==0) %>% nrow()
+
+df_bl_region
+
+df_complete <- left_join(df_bl_region, 
+                         df_sv_comp, 
+                         by="record_id") %>%
+  select(-c(wave, wave_name)) %>%
+  filter(!is.na(date)) %>%
+  mutate(days=as.numeric(date-min(date))) %>% 
+  filter((date > "2020-03-30") & (date < "2020-10-15"))                   # End of local LD
+
+get_date <- function(df, dates){
+  date <- df %>%
+    filter(date == dates) %>%
+    select(days) %>%
+    pull() %>%
+    `[[`(1)
+  return(date)
+}
+
+date_5 <- get_date(df_complete, "2020-07-04")
+date_6 <- get_date(df_complete, "2020-07-25") 
+date_3 <- get_date(df_complete, "2020-08-01") 
+date_2 <- get_date(df_complete, "2020-08-05")
+
+df_complete_reg <- df_complete %>%
+  mutate(first.treat = 
+           case_when((region == 5) ~ date_5,
+                     (region == 6) ~ date_6,
+                     (region == 3) ~ date_3,
+                     (region == 2) ~ date_2,
+                     TRUE ~ 0),
+         Post = 
+           case_when((region == 5) & (date>=date_5) ~ 1,
+                     (region == 6) & (date>=date_6) ~ 1,
+                     (region == 3) & (date>=date_3) ~ 1,
+                     (region == 2) & (date>=date_2) ~ 1,   
+                     TRUE ~ 0),
+         Treat = 
+           case_when((region == 5) ~ 1,
+                     (region == 6) ~ 1,
+                     (region == 3) ~ 1,
+                     (region == 2) ~ 1,   
+                     TRUE ~ 0)
+         )
+
+
+df_complete_reg$time_to_treat <- ifelse(df_complete_reg$Treat == 1, 
+                                        df_complete_reg$days - df_complete_reg$first.treat, 
+                                        0)
+
+df_complete_reg
+```
+
+```{r}
+# Days
+
+model_dps <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) +
+                     age + gender + ethnic + education + employment + exercise |
+                     record_id + days,   ## FEs
+                   data = df_complete_reg)
+
+# where:
+# MH is the mental health index outcome variable
+# LLD is the local lockdown dummy variable
+# X is a vector of individual-level controls
+# group accounts for the group fixed effects
+# time accounts for the time fixed effects
+# data is your data.frame
+
+iplot(model_dps, 
+      xlab = 'Time to treatment',
+      main = 'Event study: Staggered treatment (TWFE)')
+
+
+mod_sa = feols(dps_idx ~ sunab(first.treat, days) +
+                     age + gender + ethnic + education + employment + exercise |
+                     record_id + days,   ## FEs
+                   data = df_complete_reg)
+
+
+fixed_effect <- fixef(model_dps)
+summary(fixed_effect)
+plot(fixed_effect)
+etable(model_dps, cluster = "days", tex = TRUE)
+
+
+# Parallel Trends
+iplot(list(model_dps, mod_sa), sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Event study: Staggered treatment')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE", "Sun & Abraham (2020)"))
+```
+
+# days
+
+```{r}
+out_axy <- att_gt(yname  = "axy_idx",
+              gname  = "first.treat",
+              idname = "record_id",
+              tname  = "days",
+              xformla = ~1,
+              data   = df_complete_reg,
+              est_method = "reg",
+              panel  = FALSE
+              )
+
+# summary(out)
+# 
+# ggdid(out)
+```
+
+
+# weeks
+```{r}
+df_complete_week <- df_complete %>%
+  mutate(weeks = as.numeric(days) %/% 7 + 1)
+
+date_5 <- df_complete_week %>% filter(date=="2020-07-04") %>% select(weeks) %>% pull() %>% `[[`(1)
+date_6 <- df_complete_week %>% filter(date=="2020-07-25") %>% select(weeks) %>% pull() %>% `[[`(1)
+date_3 <- df_complete_week %>% filter(date=="2020-08-01") %>% select(weeks) %>% pull() %>% `[[`(1)
+date_2 <- df_complete_week %>% filter(date=="2020-08-05") %>% select(weeks) %>% pull() %>% `[[`(1)
+
+
+df_complete_reg_week <- df_complete_week %>%
+  mutate(first.treat = 
+           case_when(
+             (region == 5) ~ date_5,
+             (region == 6) ~ date_6,
+             (region == 3) ~ date_3,
+             (region == 2) ~ date_2,
+             TRUE ~ 0
+             ),
+         Treat = 
+           case_when(
+             (region == 5) ~ 1,
+             (region == 6) ~ 1,
+             (region == 3) ~ 1,
+             (region == 2) ~ 1,   
+             TRUE ~ 0
+             ),
+         Post = 
+           case_when(
+             (region == 5) & (weeks>=date_5) ~ 1,
+             (region == 6) & (weeks>=date_6) ~ 1,
+             (region == 3) & (weeks>=date_3) ~ 1,
+             (region == 2) & (weeks>=date_2) ~ 1,   
+             TRUE ~ 0
+             ),
+         time_to_treat = 
+           ifelse(Treat == 1, 
+                  weeks - first.treat, 
+                  0)
+         )
+```
+
+```{r}
+# Summarize the data
+df_summary <- df_complete_reg_week %>%
+  group_by(weeks) %>%  # Replace 'your_date_column' with the actual name of the date column
+  summarize(respondents = n())
+
+# Create the line plot
+plot <- ggplot(df_summary, aes(x = weeks, y = respondents)) +
+  geom_line(color = "blue") +
+  labs(
+    title = "Number of Respondents Over Time",
+    x = "Weeks",
+    y = "Number of Respondents"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10)
+  )
+
+print(plot)
+
+df_summary <- df_complete_reg_week %>%
+  group_by(days) %>%  # Replace 'your_date_column' with the actual name of the date column
+  summarize(respondents = n())
+
+# Create the line plot
+plot <- ggplot(df_summary, aes(x = days, y = respondents)) +
+  geom_line(color = "red") +
+  labs(
+    title = "Number of Respondents Over Time",
+    x = "Days",
+    y = "Number of Respondents"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10)
+  )
+
+ plot
+```
+
+
+```{r}
+df_complete_reg_week$education  <- factor(df_complete_reg_week$education)
+df_complete_reg_week$gender     <- factor(df_complete_reg_week$gender)
+df_complete_reg_week$ethnic     <- factor(df_complete_reg_week$ethnic)
+df_complete_reg_week$employment <- factor(df_complete_reg_week$employment)
+
+mod_twfe_dps_w <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) +
+                     age + gender + ethnic + education + employment + exercise |
+                     record_id + weeks + region,   ## FEs
+                   data = df_complete_reg_week)
+
+mod_sa_dps_w <- feols(dps_idx ~ sunab(first.treat, weeks) + 
+                        age + gender + ethnic + education + employment + exercise |
+                        record_id + weeks + region,   ## FEs
+                    data = df_complete_reg_week)
+
+# Anxiety
+mod_twfe_axy_w <- feols(axy_idx ~ i(time_to_treat, Treat, ref=-1) +
+                          age + gender + ethnic + education + employment + exercise |
+                          record_id + weeks + region,   ## FEs
+                        data = df_complete_reg_week)
+
+mod_sa_axy_w <- feols(axy_idx ~ sunab(first.treat, weeks) + 
+                        age + gender + ethnic + education + employment + exercise |
+                        record_id + weeks + region,   ## FEs
+                    data = df_complete_reg_week)
+
+# Parallel Trends
+## Depression Index
+
+par(cex=0.9, font.main=1)  # cex < 1 will reduce font size; font.main = 1 will make title normal (not bold)
+iplot(list(mod_twfe_dps_w, mod_sa_dps_w), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Weeks to treatment',
+      ylab = 'Average effect (std. dev.)',
+      main = 'Event study estimators')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE OLS", "Sun & Abraham (2020)"),
+       cex = 0.9)
+
+## Anxiety Index
+iplot(list(mod_twfe_axy_w, mod_sa_axy_w), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Weeks to treatment',
+      ylab = 'Average effect (std. dev.)',
+      main = 'Treatment Effect Until July 24th (Anxiety Index)')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE OLS", "Sun & Abraham (2020)"),
+       cex = 0.9)
+
+
+mod_dps_w <- feols(dps_idx ~ Post +
+                   age + gender + ethnic + education + employment + exercise |
+                 record_id + weeks,   ## FEs
+               data = df_complete_reg_week)
+
+mod_axy_w <- feols(axy_idx ~ Post +
+                     age + gender + ethnic + education + employment + exercise|
+                     record_id + weeks,   ## FEs
+                   data = df_complete_reg_week)
+
+mod_dps_w_reg <- feols(dps_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                 record_id + region + weeks,   ## FEs
+               data = df_complete_reg_week)
+
+mod_axy_w_reg <- feols(axy_idx ~ Post +
+                     age + gender + ethnic + education + employment + exercise|
+                     record_id + region + weeks,   ## FEs
+                   data = df_complete_reg_week)
+
+mod_dps_w_rc <- feols(dps_idx ~ Post +
+                     age + gender + ethnic + education + employment + exercise|
+                     region + weeks,   ## FEs
+                   data = df_complete_reg_week)
+
+mod_axy_w_rc <- feols(axy_idx ~ Post +
+                     age + gender + ethnic + education + employment + exercise|
+                     region + weeks,   ## FEs
+                   data = df_complete_reg_week)
+
+
+
+etable(mod_dps_w, mod_dps_w_reg, mod_dps_w_rc,
+       mod_axy_w, mod_axy_w_reg, mod_axy_w_rc,
+       cluster = "weeks",
+       tex = TRUE)
+```
+
+
+
+
+```{r}
+# Making the function
+MA_calculate <- function(df, n) {
+  df <- df %>%
+    mutate(MA_g = as.numeric(days) %/% n + 1)
+  
+  date_5 <- df %>% filter(date=="2020-07-04") %>% select(MA_g) %>% pull() %>% `[[`(1)
+  date_6 <- df %>% filter(date=="2020-07-25") %>% select(MA_g) %>% pull() %>% `[[`(1)
+  date_3 <- df %>% filter(date=="2020-08-01") %>% select(MA_g) %>% pull() %>% `[[`(1)
+  date_2 <- df %>% filter(date=="2020-08-05") %>% select(MA_g) %>% pull() %>% `[[`(1)
+
+  df_MA  <- df %>%
+    mutate(first.treat = 
+             case_when(
+               (region == 5) ~ date_5,
+               (region == 6) ~ date_6,
+               (region == 3) ~ date_3,
+               (region == 2) ~ date_2,
+               TRUE ~ 0),
+           Treat = 
+             case_when(
+               (region == 5) ~ 1,
+               (region == 6) ~ 1,
+               (region == 3) ~ 1,
+               (region == 2) ~ 1,
+               TRUE ~ 0),
+           Post = 
+             case_when(
+               (region == 5) & (MA_g>=date_5) ~ 1,
+               (region == 6) & (MA_g>=date_6) ~ 1,
+               (region == 3) & (MA_g>=date_3) ~ 1,
+               (region == 2) & (MA_g>=date_2) ~ 1,   
+               TRUE ~ 0
+             ),
+           time_to_treat = 
+             ifelse(Treat == 1, 
+                    MA_g - first.treat, 
+                    0)           
+         )
+
+  return(df_MA)
+}
+df_complete_MA <- MA_calculate(df_complete, 7)
+```
+
+
+```{r}
+mod_dps_w <- feols(dps_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                 record_id + MA_g,   ## FEs
+               data = df_complete_MA)
+
+mod_dps_w_reg <- feols(dps_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                 record_id + MA_g + region,   ## FEs
+               data = df_complete_MA)
+
+mod_dps_w_reg_rc <- feols(dps_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                  MA_g + region,   ## FEs
+               data = df_complete_MA)
+
+
+mod_axy_w <- feols(axy_idx ~ Post +
+                     age + gender + ethnic + education + employment + exercise |
+                     record_id + MA_g,   ## FEs
+                   data = df_complete_MA)
+
+mod_axy_w_reg <- feols(axy_idx ~ Post +
+                     age + gender + ethnic + education + employment + exercise |
+                     record_id + MA_g + region,   ## FEs
+                   data = df_complete_MA)
+
+mod_axy_w_reg_rc <- feols(axy_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                  MA_g + region,   ## FEs
+               data = df_complete_MA)
+
+etable(mod_dps_w_reg, mod_dps_w, mod_dps_w_reg_rc,
+       mod_axy_w_reg, mod_axy_w, mod_axy_w_reg_rc,
+       cluster = "MA_g",
+       tex = TRUE)
+```
+
+
+
+
+
+
+```{r}
+mod_dps_ma10 <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) + 
+                        age + gender + ethnic + education + employment + exercise|
+                        record_id + region + MA_g,   ## FEs
+                   data = df_complete_MA)
+
+mod_axy_ma10 <- feols(axy_idx ~ i(time_to_treat, Treat, ref=-1) + 
+                        age + gender + ethnic + education + employment + exercise|
+                    record_id + region + MA_g,   ## FEs
+                   data = df_complete_MA)
+
+
+mod_sa_dps_ma10 <- feols(dps_idx ~ sunab(first.treat, MA_g) + 
+                          age + gender + ethnic + education + employment + exercise|
+                   record_id + region +  MA_g,   ## FEs
+                   data = df_complete_MA)
+
+mod_sa_axy_ma10 <- feols(axy_idx ~ sunab(first.treat, MA_g) + 
+                          age + gender + ethnic + education + employment + exercise|
+                   record_id + region + MA_g,   ## FEs
+                   data = df_complete_MA)
+
+
+fixed_effect <- fixef(mod_dps_ma10)
+summary(fixed_effect)
+plot(fixed_effect)
+
+
+summary(mod_dps_ma10)
+fixed_effect <- fixef(mod_axy_ma10)
+summary(fixed_effect)
+plot(fixed_effect)
+etable(mod_dps_ma10, mod_axy_ma10, 
+       cluster = "MA_g", tex = TRUE)
+
+# mod_ATT <- feols(dps_idx ~ Treat | 
+#                   MA_g, 
+#                  data = df_complete_MA)
+# 
+# etable(mod_ATT, cluster = "MA_g", tex = TRUE)
+
+
+# Parallel Trends
+# iplot(mod_dps_ma3, 
+#       xlab = 'Time to treatment',
+#       main = 'Event study: Staggered treatment (TWFE)')
+
+# Depression Index
+iplot(list(mod_dps_ma10, mod_sa_dps_ma10), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Staggered Treatment of Local Lockdown (Depression Index)')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE", "Sun & Abraham (2020)"))
+
+# Anxiety Index
+iplot(list(mod_axy_ma10, mod_sa_axy_ma10), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Staggered Treatment of Local Lockdown (Anxiety Index)')
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE", "Sun & Abraham (2020)"))
+
+pl2
+```
+
+
+
+```{r}
+mod_dps_ma3 <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) |
+                     record_id + MA_g,   ## FEs
+                   data = df_complete_MA)
+
+mod_axy_ma3 <- feols(axy_idx ~ i(time_to_treat, Treat, ref=-1) |
+                     record_id + MA_g,   ## FEs
+                   data = df_complete_MA)
+
+
+mod_sa_dps_ma3 = feols(dps_idx ~ sunab(first.treat, MA_g)|
+                     record_id + MA_g,   ## FEs
+                   data = df_complete_MA)
+
+mod_sa_axy_ma3 = feols(axy_idx ~ sunab(first.treat, MA_g)|
+                     record_id + MA_g,   ## FEs
+                   data = df_complete_MA)
+
+
+fixed_effect <- fixef(mod_dps_ma3)
+summary(fixed_effect)
+plot(fixed_effect)
+
+fixed_effect <- fixef(mod_axy_ma3)
+summary(fixed_effect)
+plot(fixed_effect)
+etable(mod_dps_ma3, mod_axy_ma3, 
+       cluster = "MA_g", tex = TRUE)
+
+
+# Parallel Trends
+# iplot(mod_dps_ma3, 
+#       xlab = 'Time to treatment',
+#       main = 'Event study: Staggered treatment (TWFE)')
+
+# Depression Index
+iplot(list(mod_dps_ma3, mod_sa_dps_ma3), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Staggered Treatment of Local Lockdown (Depression Index)')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE", "Sun & Abraham (2020)"))
+
+# Anxiety Index
+iplot(list(mod_axy_ma3, mod_sa_axy_ma3), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Staggered Treatment of Local Lockdown (Anxiety Index)')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE", "Sun & Abraham (2020)"))
+
+
+```
+
+# Sant'anna
+```{r}
+df_complete_reg_week
+```
+
+
+```{r}
+out_weeks_axy <- att_gt(
+              yname = "axy_idx",
+              gname   = "first.treat",
+              idname  = "record_id",
+              tname   = "weeks",
+              data    = df_complete_reg_week,
+              panel   = FALSE
+              )
+
+out_weeks_dps <- att_gt(
+              yname = "dps_idx",
+              gname   = "first.treat",
+              idname  = "record_id",
+              tname   = "weeks",
+              data    = df_complete_reg_week,
+              panel   = FALSE
+              )
+
+summary(out_weeks_axy)
+ggdid(out_weeks_axy)
+```
+
+
+```{r}
+### group
+agg.gs_axy_w <- aggte(out_weeks_axy, type = "group")
+agg.gs_dps_w <- aggte(out_weeks_dps, type = "group")
+
+summary(agg.gs_axy_w)
+ggdid(agg.gs_axy_w)
+
+str(agg.gs_axy_w)
+str(agg.gs_dps_w)
+```
+
+
+```{r}
+### dynamic
+agg.es_axy_w <- aggte(out_weeks_axy, type = "dynamic")
+agg.es_dps_w <- aggte(out_weeks_dps, type = "dynamic")
+summary(agg.es_axy_w)
+ggdid(agg.es_axy_w)
+```
+
+```{r}
+# Extracting data
+egt_vals <- agg.gs_axy_w$egt
+att_vals <- agg.gs_axy_w$att.egt
+se_vals  <- agg.gs_axy_w$se.egt
+
+# Calculating the 95% confidence intervals
+lower_bound <- att_vals - 1.96 * se_vals
+upper_bound <- att_vals + 1.96 * se_vals
+
+df_plot <- data.frame(
+  Region = factor(c("Leicester", "Group1", "Group2"), 
+                  levels = c("Group2", "Group1", "Leicester")),
+  EGT = factor(egt_vals, levels = rev(egt_vals)),
+  ATT = att_vals,
+  lower_bound = lower_bound,
+  upper_bound = upper_bound
+)
+
+r <- ggplot(df_plot, aes(x = ATT, y = Region)) +
+  geom_point(aes(x = ATT), color = subtle_blue, shape = 15) + 
+  geom_errorbarh(aes(xmin = lower_bound, xmax = upper_bound), color = subtle_blue, height = 0.2) + 
+  geom_vline(xintercept = 0, color = "black") +
+  theme_minimal() +
+  theme(
+      text = element_text(family = "serif")
+    ) +
+  labs(
+    title = "Group-level (Region) ATT for Anxiety Index ",
+    x = "ATT with 95% CI",
+    y = ""
+  )
+
+# Display the plot
+print(r)
+```
+
+```{r}
+# Extracting data
+egt_vals <- agg.gs_dps_w$egt
+att_vals <- agg.gs_dps_w$att.egt
+se_vals  <- agg.gs_dps_w$se.egt
+
+# Calculating the 95% confidence intervals
+lower_bound <- att_vals - 1.96 * se_vals
+upper_bound <- att_vals + 1.96 * se_vals
+
+df_plot <- data.frame(
+  Region = factor(c("Leicester", "Group1", "Group2"), 
+                  levels = c("Group2", "Group1", "Leicester")),
+  EGT = factor(egt_vals, levels = rev(egt_vals)),
+  ATT = att_vals,
+  lower_bound = lower_bound,
+  upper_bound = upper_bound
+)
+
+u <- ggplot(df_plot, aes(x = ATT, y = Region)) +
+  geom_point(aes(x = ATT), color = subtle_blue, shape = 15) + 
+  geom_errorbarh(aes(xmin = lower_bound, xmax = upper_bound), color = subtle_blue, height = 0.2) + 
+  geom_vline(xintercept = 0, color = "black") +
+  theme_minimal() +
+  theme(
+      text = element_text(family = "serif")
+    ) +
+  labs(
+    title = "Group-level (Region) ATT for Depression Index",
+    x = "ATT with 95% CI",
+    y = ""
+  )
+
+# Display the plot
+print(u)
+```
+
+
+```{r}
+# Anxiety index
+
+# Define a more subtle shade of blue
+subtle_blue <- rgb(65/255, 105/255, 225/255)  # Lighter shade of blue
+
+par(cex=0.9, font.main=1)  # cex < 1 will reduce font size; font.main = 1 will make title normal (not bold)
+
+# Plot the first two models using iplot
+iplot(list(mod_axy_ma10, mod_sa_axy_ma10), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Weeks since treatment',
+      ylab = 'Average effect (std. dev.)',
+      main = 'Event Study For Leicester Region Treatment (Anxiety Index)')
+
+# Extract aggregated event-time estimates from agg.es_axy_w
+time_points <- agg.es_axy_w$egt
+estimates   <- agg.es_axy_w$att.egt
+se <- agg.es_axy_w$se.egt
+upper_bound <- estimates + 1.96 * se
+lower_bound <- estimates - 1.96 * se
+
+# Add aggregated event-time estimates points to the plot with square markers and the subtle blue color
+points(time_points, estimates, col = subtle_blue, pch = 15)
+
+# Add error bars for 95% CI in the subtle blue color
+arrows(time_points, lower_bound, time_points, upper_bound, angle = 90, code = 3, length = 0.05, col = subtle_blue)
+
+# Update legend to include the new model and position it at the exact bottom left corner
+legend("bottomleft", inset = c(0, 0), col = c(1, 2, subtle_blue), pch = c(20, 17, 15), 
+       legend = c("TWFE", "Sun & Abraham (2020)", "Callaway and Sant’Anna (2021)"))
+```
+
+```{r}
+# Depression Index
+
+# Define a more subtle shade of blue
+subtle_blue <- rgb(65/255, 105/255, 225/255)  # Lighter shade of blue
+
+par(cex=0.9, font.main=1)  # cex < 1 will reduce font size; font.main = 1 will make title normal (not bold)
+
+# Plot the first two models using iplot
+iplot(list(mod_dps_ma10, mod_sa_dps_ma10), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Weeks since treatment',
+      ylab = 'Average effect (std. dev.)',
+      main = 'Event Study For Leicester Region Treatment (Depression Index)')
+
+# Extract aggregated event-time estimates from agg.es_axy_w
+time_points <- agg.es_dps_w$egt
+estimates   <- agg.es_dps_w$att.egt
+se <- agg.es_axy_w$se.egt
+upper_bound <- estimates + 1.96 * se
+lower_bound <- estimates - 1.96 * se
+
+# Add aggregated event-time estimates points to the plot with square markers and the subtle blue color
+points(time_points, estimates, col = subtle_blue, pch = 15)
+
+# Add error bars for 95% CI in the subtle blue color
+arrows(time_points, lower_bound, time_points, upper_bound, angle = 90, code = 3, length = 0.05, col = subtle_blue)
+
+# Update legend to include the new model and position it at the exact bottom left corner
+legend("bottomleft", inset = c(0, 0), col = c(1, 2, subtle_blue), pch = c(20, 17, 15), 
+       legend = c("TWFE", "Sun & Abraham (2020)", "Callaway and Sant’Anna (2021)"))
+```
+
+
+```{r}
+### simple
+axy_simple <- aggte(out_weeks_axy, type = "simple")
+dps_simple <- aggte(out_weeks_dps, type = "simple")
+
+str(summary(axy_simple))
+summary(dps_simple)
+```
+
+```{r}
+df_axy_simple
+```
+
+
+```{r}
+library(ggplot2)
+# depression index
+# Extract the positive time periods from the object
+positive_time_points <- agg.es_dps_w$egt[agg.es_dps_w$egt > 0]
+positive_estimates   <- agg.es_dps_w$att.egt[agg.es_dps_w$egt > 0]
+positive_se <- agg.es_dps_w$se.egt[agg.es_dps_w$egt > 0]
+
+upper_bound <- positive_estimates + 1.96 * positive_se
+lower_bound <- positive_estimates - 1.96 * positive_se
+
+df_plot <- data.frame(
+  Time = positive_time_points,
+  ATT = positive_estimates,
+  lower_bound = lower_bound,
+  upper_bound = upper_bound
+)
+
+# Create the ggplot without the legend
+p <- ggplot(df_plot, aes(x = Time, y = ATT)) + 
+  geom_point(aes(y = ATT, color = "ATT"), shape = 15) + 
+  geom_errorbar(aes(ymin = lower_bound, ymax = upper_bound, color = "ATT"), width = 0.2) + 
+  geom_hline(yintercept = 0, color = "black") +  # This line adds a horizontal line at ATT=0
+  geom_smooth(method = "lm", se = FALSE, color = "#E60026", linetype = "dashed", ) +  # This line adds the trend line
+  theme_minimal() +
+  theme(
+    text = element_text(family = "serif"),
+    legend.position = "none"  # This removes the legend
+  ) +
+  labs(
+    title = "Cumulative Treatment Effect over Time for the Depression Index (Post-Treatment)",
+    x = "Week post treatment",
+    y = "ATT with 95% CI"
+  ) +
+  scale_color_manual(values = subtle_blue)
+
+
+# Display the plot
+print(p)
+```
+
+
+
+```{r}
+# anxiety index
+# Extract the positive time periods from the object
+positive_time_points <- agg.es_axy_w$egt[agg.es_axy_w$egt > 0]
+positive_estimates  <- agg.es_axy_w$att.egt[agg.es_axy_w$egt > 0]
+positive_se <- agg.es_axy_w$se.egt[agg.es_axy_w$egt > 0]
+
+upper_bound <- positive_estimates + 1.96 * positive_se
+lower_bound <- positive_estimates - 1.96 * positive_se
+
+df_plot <- data.frame(
+  Time = positive_time_points,
+  ATT = positive_estimates,
+  lower_bound = lower_bound,
+  upper_bound = upper_bound
+)
+
+# Create the ggplot without the legend
+q <- ggplot(df_plot, aes(x = Time, y = ATT)) + 
+  geom_point(aes(y = ATT, color = "ATT"), shape = 15) + 
+  geom_errorbar(aes(ymin = lower_bound, ymax = upper_bound, color = "ATT"), width = 0.2) + 
+  geom_hline(yintercept = 0, color = "black") +  # This line adds a horizontal line at ATT=0
+  geom_smooth(method = "lm", se = FALSE, color = "#E60026", linetype = "dashed", ) +  # This line adds the trend line
+  theme_minimal() +
+  theme(
+    text = element_text(family = "serif"),
+    legend.position = "none"  # This removes the legend
+  ) +
+  labs(
+    title = "Cumulative Treatment Effect over Time for the Anxiety Index (Post-Treatment)",
+    x = "Week post treatment",
+    y = "ATT with 95% CI"
+  ) +
+  scale_color_manual(values = subtle_blue)
+
+# Display the plot
+print(q)
+```
+
+
+```{r}
+### calendar time effects
+agg.ct_axy_w <- aggte(out_weeks_axy, type = "calendar")
+agg.ct_dps_w <- aggte(out_weeks_dps, type = "calendar")
+
+summary(agg.ct_axy_w)
+```
+
+```{r}
+# depression index
+# Extract the positive time periods from the object
+positive_time_points <- agg.ct_axy_w$egt[agg.ct_axy_w$egt > 0]
+positive_estimates   <- agg.ct_axy_w$att.egt[agg.ct_axy_w$egt > 0]
+positive_se <- agg.ct_axy_w$se.egt[agg.ct_axy_w$egt > 0]
+
+upper_bound <- positive_estimates + 1.96 * positive_se
+lower_bound <- positive_estimates - 1.96 * positive_se
+
+df_plot <- data.frame(
+  Time = positive_time_points,
+  ATT = positive_estimates,
+  lower_bound = lower_bound,
+  upper_bound = upper_bound
+)
+
+# Create the ggplot without the legend
+p <- ggplot(df_plot, aes(x = Time, y = ATT)) + 
+  geom_point(aes(y = ATT, color = "ATT"), shape = 15) + 
+  geom_errorbar(aes(ymin = lower_bound, ymax = upper_bound, color = "ATT"), width = 0.2) + 
+  geom_hline(yintercept = 0, color = "black") +  # This line adds a horizontal line at ATT=0
+  theme_minimal() +
+  theme(
+    text = element_text(family = "serif"),
+    legend.position = "none"  # This removes the legend
+  ) +
+  labs(
+    title = "Change of ATT over Calendar Time for the Anxiety Index (Post-Treatment)",
+    x = "Week",
+    y = "ATT with 95% CI"
+  ) +
+  scale_color_manual(values = subtle_blue)  
+
+p
+```
+
+```{r}
+# agg.ct_dps_w <- aggte(out_weeks_dps, type = "calendar")
+
+# Anxiety index
+# Extract the positive time periods from the object
+positive_time_points <- agg.ct_dps_w$egt[agg.ct_dps_w$egt > 0]
+positive_estimates   <- agg.ct_dps_w$att.egt[agg.ct_dps_w$egt > 0]
+positive_se <- agg.ct_dps_w$se.egt[agg.ct_dps_w$egt > 0]
+
+upper_bound <- positive_estimates + 1.96 * positive_se
+lower_bound <- positive_estimates - 1.96 * positive_se
+
+df_plot <- data.frame(
+  Time = positive_time_points,
+  ATT = positive_estimates,
+  lower_bound = lower_bound,
+  upper_bound = upper_bound
+)
+
+# Create the ggplot without the legend
+p <- ggplot(df_plot, aes(x = Time, y = ATT)) + 
+  geom_point(aes(y = ATT, color = "ATT"), shape = 15) + 
+  geom_errorbar(aes(ymin = lower_bound, ymax = upper_bound, color = "ATT"), width = 0.2) + 
+  geom_hline(yintercept = 0, color = "black") +  # This line adds a horizontal line at ATT=0
+  theme_minimal() +
+  theme(
+    text = element_text(family = "serif"),
+    legend.position = "none"  # This removes the legend
+  ) +
+  labs(
+    title = "Change of ATT over Calendar Time for the Depression Index (Post-Treatment)",
+    x = "Week",
+    y = "ATT with 95% CI"
+  ) +
+  scale_color_manual(values = subtle_blue)  
+
+p
+```
+
+
+```{r}
+# First, convert 'MA' to a factor
+df_complete_reg_week$W_factor <- as.factor(df_complete_reg_week$weeks)
+
+# Estimate the TWFE model with interaction terms
+model_dps_Weeks <- plm(dps_idx ~ Post:W_factor - 1,
+                 data   = df_complete_reg_week, 
+                 index  = c("record_id", "weeks"),
+                 model  = "within",
+                 effect = "twoways"
+                 )
+
+summary(model_dps_Weeks)
+```
+
+
+```{r}
+# save the RMD file
+save(out_weeks_axy, agg.es_axy_w, agg.gs_axy_w, agg.ct_axy_w,
+     file = "../result/anxiety_index/weeks_allin.RData")
+```
+
+
+
+
+
+
+```{r}
+df_complete_MA <- MA_calculate(df_complete, 3)
+df_complete_MA
+
+out_MA3 <- att_gt(yname = "dps_idx",
+              est_method  = "reg",
+              gname   = "first.treat",
+              idname  = "record_id",
+              tname   = "MA_g",
+              xformla = ~1,
+              data    = df_complete_MA,
+              panel   = FALSE
+              )
+
+summary(out_MA3)
+ggdid(out_MA3)
+
+es_MA3 <- aggte(out_MA3, type = "dynamic")
+ggdid(es_MA3)
+```
+
+```{r}
+# Modelling TWFE
+# First, convert 'MA' to a factor
+df_complete_MA$MA_g_factor <- as.factor(df_complete_MA$MA_g)
+
+# Estimate the TWFE model with interaction terms
+model_dps_MA3 <- plm(dps_idx ~ Post:MA_g_factor - 1,
+                 data   = df_complete_MA, 
+                 index  = c("record_id", "MA_g"),
+                 model  = "within",
+                 effect = "twoways"
+                 )
+
+summary(model_dps_MA3)
+```
+
+
+```{r}
+### 5 days
+df_complete_MA5 <- MA_calculate(df_complete, 5)
+  
+out_MA5 <- att_gt(yname = "dps_idx",
+              est_method  = "reg",
+              gname   = "first.treat",
+              idname  = "record_id",
+              tname   = "MA_g",
+              xformla = ~1,
+              data    = df_complete_MA5,
+              panel   = FALSE
+              )
+
+summary(out_MA5)
+ggdid(out_MA5)
+
+es_MA5 <- aggte(out_MA5, type = "dynamic")
+ggdid(es_MA5)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

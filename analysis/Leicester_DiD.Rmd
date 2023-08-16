@@ -1,0 +1,496 @@
+---
+title: "R Data Preprocessing"
+subtitle: "Difference in Differences Setup"
+author: ""
+date: ''
+output:
+  pdf_document: default
+  html_document: default
+---
+# Setup
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,warning=F,message=F}
+# read in required packages
+# install.packages("plm") # Uncomment and run (once) if not already installed
+# ... similarly for the other packages if needed
+
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(markdown)
+library(plm)
+library(did)
+```
+
+
+```{r}
+df_bl <- read.csv("../data/baseline.csv")
+df_sv <- read.csv("../data/survey.csv")
+```
+
+```{r}
+head(df_sv, 10)
+```
+
+# LEICESTER Region DiD Setup
+
+- Ever-treated (G): Units that are treated 
+- Treated (D): After July 4th
+- 
+
+```{r}
+# define each columns
+sv_column <- list('record_id', 'wave', 'wave_name', 'date',  ## Data info
+                 'soc1', 'soc2', 'soc3', 'soc4', 
+                 'phq1', 'phq2', 'phq3', 'phq4', 'phq5', 'phq6', 'phq7', 'phq8', 'phq9', ## depression index
+                 'gad1', 'gad2', 'gad3', 'gad4', 'gad5', 'gad6', 'gad7') ## Anxiety index
+
+df_sv_mod <- df_sv %>% select(!!! sv_column)
+df_sv_mod_filtered <- df_sv_mod %>% 
+  filter(!is.na(date) & date != " " & !is.na(soc1)) 
+
+df_sv_mod_filtered$date <- as.Date(df_sv_mod_filtered$date, format="%m/%d/%Y")
+df_sv_comp <- df_sv_mod_filtered %>% 
+  mutate(dps_idx = phq1 + phq2 + phq3 + phq4 + phq5 + phq6 + phq7 + phq8 + phq9,
+         axy_idx = gad1 + gad2 + gad3 + gad4 + gad5 + gad6 + gad7) %>%
+  select(-starts_with("phq"), 
+         -starts_with("gad"))
+
+df_sv_hm <- df_sv_comp %>% select(-c(wave, wave_name, soc1, soc2, soc3, soc4))
+df_sv_hm
+```
+
+```{r}
+# fill the NA value with distinguishable number
+df_bl_mod <- df_bl %>%
+  mutate_all(~ ifelse(is.na(.), 10000, .)) %>%
+  select(-c(X, w1wgt))
+```
+
+```{r}
+df_hm <- left_join(df_sv_hm, df_bl_mod, by="record_id") %>%
+  mutate(date_count=as.integer(date-min(date)))
+df_hm_comp <- df_hm %>% 
+  select(-c(record_id, date)) %>%
+  select(-starts_with("keyworker"), -starts_with("garden")) %>%
+  filter((dps_idx > 4) & (axy_idx > 3))
+
+correlation_matrix <- cor(df_hm_comp)
+corrplot(correlation_matrix, method = "color")
+
+correlation_matrix_subset <- correlation_matrix[1:2, ]
+
+# Set up the correlation plot with custom colors
+# Set up the plot size (e.g., 10 inches wide and 8 inches high)
+par(plt=c(0.1, 0.9, 0.1, 0.8), mar=c(5, 4, 4, 2) + 0.1)
+
+corrplot(correlation_matrix_subset, method = "color",
+         tl.cex = 0.7, tl.col = "black")
+
+
+corrplot(correlation_matrix_subset, method = "color", type = "upper",
+         tl.cex = 0.7, tl.col = "black",
+         col = c("white", "yellow")[1 + (correlation_matrix >= 0.3)],
+         addrect = 2, rect.col = "red",
+         number.cex = 0.8)
+```
+
+# Data Cleansing
+```{r}
+# Data Cleansing
+df_leicester <- read.csv("../data/df_did.csv")
+df_leicester$date <- as.Date(df_leicester$date, format="%Y-%m-%d")
+
+df_leicester_mod <- df_leicester %>% 
+  select(
+    -starts_with("soc"), 
+    -starts_with("phq"), 
+    -starts_with("gad"), 
+    -c(leicester, X, wave_name, wave)) %>%
+  rename(
+    comp_idx = followingisolation,
+    dps_idx  = depression_index,
+    axy_idx  = anxiety_index,
+    T        = days_since_min_date,
+    W        = week_number,
+    Treat    = G,
+    Post     = D
+    ) %>%
+  mutate(
+    Treat = ifelse(Treat == 105, 1, Treat)
+    )
+  
+
+df_leicester_mod %>% filter(Treat==1 & Post==1)
+df_leicester_mod
+```
+
+# TWFE Simple
+```{r}
+# Estimate the TWFE model
+model_dps <- plm(dps_idx ~ Post, 
+             data   = df_leicester_mod, 
+             index  = c("record_id", "T"),
+             model  = "within",
+             effect = "twoways"
+             )
+
+# Display the summary of the model
+summary(model_dps)
+
+
+# Estimate the TWFE model
+model_axy <- plm(axy_idx ~ Post, 
+             data   = df_leicester_mod, 
+             index  = c("record_id", "T"),
+             model  = "within",
+             effect = "twoways"
+             )
+
+# Display the summary of the model
+summary(model_axy)
+```
+
+```{r}
+###############################################################
+
+# First, convert 'T' to a factor
+df_leicester_mod$T_factor <- as.factor(df_leicester_mod$T)
+
+# Create interaction terms between 'Post' and each level of 'T'
+df_leicester_mod$Post_T_factor <- interaction(df_leicester_mod$Post, 
+                                              df_leicester_mod$T_factor)
+
+# Estimate the TWFE model with interaction terms
+model_dps_int <- plm(dps_idx ~ Post_T_factor - 1,
+                 data   = df_leicester_mod, 
+                 index  = c("record_id", "T"),
+                 model  = "within",
+                 effect = "twoways"
+                 )
+
+# Display the summary of the model
+summary(model_dps_int)
+
+
+# Estimate the TWFE model with interaction terms
+model_axy_int <- plm(axy_idx ~ Post_T_factor - 1,
+                 data   = df_leicester_mod, 
+                 index  = c("record_id", "T"),
+                 model  = "within",
+                 effect = "twoways"
+                 )
+
+# Display the summary of the model
+summary(model_axy_int)
+```
+
+
+
+```{r}
+# aggregate in Week number
+df_leicester_week <- df_leicester_mod %>%
+  select(-c(date)) %>%
+  group_by(record_id, W) %>%
+  summarise_all(mean, na.rm = TRUE)
+```
+
+# Concatenation based on Weeks
+```{r}
+# Estimate the TWFE model
+model_dps <- plm(dps_idx ~ Post, 
+             data   = df_leicester_week, 
+             index  = c("record_id", "W"),
+             model  = "within",
+             effect = "twoways"
+             )
+
+# Display the summary of the model
+summary(model_dps)
+
+
+# Estimate the TWFE model
+model_axy <- plm(axy_idx ~ Post, 
+             data   = df_leicester_week, 
+             index  = c("record_id", "W"),
+             model  = "within",
+             effect = "twoways"
+             )
+
+# Display the summary of the model
+summary(model_axy)
+```
+
+```{r}
+# First, convert 'W' to a factor
+df_leicester_week$W_factor <- as.factor(df_leicester_week$W)
+
+# Create interaction terms between 'Post' and each level of 'W'
+df_leicester_week$Post_W_factor <- interaction(df_leicester_week$Post, 
+                                               df_leicester_week$W_factor)
+
+# Estimate the TWFE model with interaction terms
+model_dps_int <- plm(dps_idx ~ Post:W_factor - 1,
+                 data   = df_leicester_week, 
+                 index  = c("record_id", "W"),
+                 model  = "within",
+                 effect = "twoways"
+                 )
+
+# Display the summary of the model
+summary(model_dps_int)
+
+
+# Estimate the TWFE model with interaction terms
+model_axy_int <- plm(axy_idx ~ Post_W_factor - 1,
+                 data   = df_leicester_week, 
+                 index  = c("record_id", "W"),
+                 model  = "within",
+                 effect = "twoways"
+                 )
+
+# Display the summary of the model
+summary(model_axy_int)
+```
+
+## One way Fixed Effect
+```{r}
+one_way_model <- plm(dps_idx ~ Post, 
+                     data = df_leicester_mod, 
+                     model = "within", 
+                     index = c("T")
+                     )
+
+summary(one_way_model)
+```
+
+
+# Moving Average for Post treated for individuals
+
+```{r}
+MA_calculate <- function(df, n) {
+  # Step 1: Create a new column "MA_count" for moving average calculation
+  df <- df %>%
+    mutate(MA_count = as.numeric(as.Date(date) - as.Date("2020-07-04")) %/% n + 1)
+  
+  # # Step 2: Group by "MA_count" and calculate the average for all columns
+  # df_avg <- df %>%
+  #   group_by(MA_count, record_id) %>%
+  #   summarise(across(everything(), mean, na.rm = TRUE))
+  # 
+  # # Step 3: Drop the "date" column
+  # df_avg <- df_avg %>%
+  #   select(-date)
+  # 
+  # # Return the new dataframe with the moving average calculated
+  return(df)
+}
+
+df_leicester_MA <- MA_calculate(df_leicester_mod, 3)
+df_leicester_MA
+```
+
+```{r}
+df_leicester_MA <- MA_calculate(df_leicester_mod, 4)
+
+# First, convert 'MA' to a factor
+df_leicester_MA$MA_factor <- as.factor(df_leicester_MA$MA_count)
+
+# Estimate the TWFE model with interaction terms
+modelMA_dps_int <- plm(dps_idx ~ Post:MA_factor - 1,
+                 data   = df_leicester_MA, 
+                 index  = c("record_id", "MA_count"),
+                 model  = "within",
+                 effect = "twoways"
+                 )
+
+# Display the summary of the model
+summary(modelMA_dps_int)
+
+
+# Estimate the TWFE model with interaction terms
+modelMA_axy_int <- plm(axy_idx ~ Post:MA_factor - 1,
+                 data   = df_leicester_MA, 
+                 index  = c("record_id", "MA_count"),
+                 model  = "within",
+                 effect = "twoways"
+                 )
+
+# Display the summary of the model
+summary(modelMA_axy_int)
+```
+
+```{r}
+df_leicester_MA <- MA_calculate(df_leicester_mod, 4)
+
+# First, convert 'MA' to a factor
+df_leicester_MA$MA_factor <- as.factor(df_leicester_MA$MA_count)
+
+# Sort the data by individual and time
+df_leicester_MA <- df_leicester_MA %>%
+  arrange(record_id, MA_count)
+
+# Create a lagged variable for one period
+df_leicester_MA <- df_leicester_MA %>%
+  group_by(record_id) %>%
+  mutate(Post_lag1 = lag(Post, 1),
+         Post_lag2 = lag(Post, 2),
+         Post_lag3 = lag(Post, 3),
+         Post_lag4 = lag(Post, 4),
+         Post_lag5 = lag(Post, 5),
+         Post_lag6 = lag(Post, 6)
+         )
+
+# Run the regression model with lagged variables
+model_lag <- plm(axy_idx ~ Post + Post_lag6, 
+                 data   = df_leicester_MA, 
+                 model  = "within",
+                 effect = "twoways", 
+                 index  = c("record_id", "MA_count")
+                 )
+
+summary(model_lag)
+
+df_leicester_MA_gal <- df_leicester_MA %>% 
+  filter(gender==2)
+df_leicester_MA_gal
+
+# Run the regression model with lagged variables
+model_lag <- plm(axy_idx ~ Post:MA_factor - 1, 
+                 data   = df_leicester_MA, 
+                 model  = "within",
+                 effect = "twoways", 
+                 index  = c("record_id", "MA_count")
+                 )
+
+summary(model_lag)
+```
+
+# Parallel Trends
+```{r}
+library(did)
+data(mpdta)
+
+mpdta
+
+out <- att_gt(yname = "lemp",
+              gname = "first.treat",
+              idname = "countyreal",
+              tname = "year",
+              xformla = ~1,
+              data = mpdta,
+              est_method = "reg"
+              )
+
+es <- aggte(out, type = "dynamic")
+ggdid(es)
+```
+
+
+
+```{r}
+# model_dps <- plm(dps_idx ~ Post, 
+#              data   = df_leicester_mod, 
+#              index  = c("record_id", "T"),
+#              model  = "within",
+#              effect = "twoways"
+#              )
+
+min_time <- df_leicester_mod %>% filter(Treat==1 & Post==1) %>% select(T) %>% min()
+
+df_mod_pt <- df_leicester_mod %>%
+  mutate(first.treat := case_when(Treat==1 ~ min_time,
+                                  Treat==0 ~ 0))
+df_mod_pt
+
+out <- att_gt(yname   = "dps_idx",
+              gname   = "first.treat",
+              idname  = "record_id",
+              tname   = "T",
+              xformla = ~1,
+              data    = df_mod_pt,
+              est_method = "reg",
+              panel   = FALSE 
+              )
+
+es <- aggte(out, type = "dynamic")
+ggdid(es)
+```
+
+```{r}
+## Week
+min_time <- df_leicester_week %>% 
+  filter(Treat==1 & Post==1) %>% 
+  select(W) %>% 
+  min()
+
+df_mod_pt <- df_leicester_week %>%
+  mutate(first.treat := case_when(Treat==1 ~ min_time,
+                                  Treat==0 ~ 0))
+df_mod_pt
+
+out <- att_gt(yname   = "dps_idx",
+              gname   = "first.treat",
+              idname  = "record_id",
+              tname   = "W",
+              xformla = ~1,
+              data    = df_mod_pt,
+              est_method = "reg",
+              panel   = FALSE 
+              )
+
+es <- aggte(out, type = "dynamic")
+ggdid(es)
+```
+
+
+```{r}
+## MA
+
+min_time <- df_leicester_MA %>% 
+  filter(Treat==1 & Post==1) %>% 
+  select(MA_count) %>% 
+  min()
+
+df_mod_pt <- df_leicester_MA %>%
+  mutate(first.treat := case_when(Treat==1 ~ min_time,
+                                  Treat==0 ~ 0))
+
+out <- att_gt(yname   = "dps_idx",
+              gname   = "first.treat",
+              idname  = "record_id",
+              tname   = "MA_count",
+              xformla = ~1,
+              data    = df_mod_pt,
+              est_method = "reg",
+              panel   = FALSE 
+              )
+
+es <- aggte(out, type = "dynamic")
+ggdid(es)
+```
+
+
+
+
+# Others
+```{r}
+oxcgrt <- read.csv("/Users/nooboo/Desktop/MY498_data/oxcgr/UK_oxcgrt.csv")
+```
+
+
+```{r}
+install.packages("corrplot")
+library(corrplot)
+
+
+
+correlation_matrix <- cor(df)
+corrplot(correlation_matrix, method = "color")
+```
+
+
+

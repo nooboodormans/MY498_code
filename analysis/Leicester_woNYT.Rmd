@@ -1,0 +1,249 @@
+---
+title: "Leicester with Not Yet Treated"
+subtitle: "Actual"
+author: ""
+date: ''
+output:
+  pdf_document: default
+  html_document: default
+---
+# Setup
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,warning=F,message=F}
+# read in required packages
+# install.packages("plm") # Uncomment and run (once) if not already installed
+# ... similarly for the other packages if needed
+# install.packages("huxtable")
+
+library(huxtable)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(markdown)
+library(plm)
+library(did)
+library(fixest)
+```
+
+
+```{r}
+# read the data
+df_bl <- read.csv("../data/baseline.csv")
+df_sv <- read.csv("../data/survey.csv")
+```
+
+
+```{r}
+# define each columns
+sv_column <- list('record_id', 'wave', 'wave_name', 'date',  ## Data info
+                 'soc1', 'soc2', 'soc3', 'soc4', 
+                 'phq1', 'phq2', 'phq3', 'phq4', 'phq5', 'phq6', 'phq7', 'phq8', 'phq9', ## depression index
+                 'gad1', 'gad2', 'gad3', 'gad4','gad5', 'gad6','gad7') ## Anxiety index
+
+df_sv_mod <- df_sv %>% select(!!! sv_column)
+df_sv_mod_filtered <- df_sv_mod %>% filter(!is.na(date) & date != " " & !is.na(soc1)) 
+
+df_sv_mod_filtered$date <- as.Date(df_sv_mod_filtered$date, format="%m/%d/%Y")
+df_sv_comp <- df_sv_mod_filtered %>% 
+  mutate(dps_idx = phq1 + phq2 + phq3 + phq4 + phq5 + phq6 + phq7 + phq8 + phq9,
+         axy_idx = gad1 + gad2 + gad3 + gad4 + gad5 + gad6 + gad7) %>%
+  select(-starts_with("phq"),
+         -starts_with("gad"))
+
+df_sv_hm <- df_sv_comp %>% 
+  select(-c(wave, wave_name, soc1, soc2, soc3, soc4))
+
+df_bl_region <- df_bl[!is.na(df_bl$region), ] %>%
+  filter(country==1) %>%
+  select(-starts_with("keyworker"), 
+         -starts_with("garden"), 
+         -starts_with("illness"),
+         -starts_with("pets"),
+         -starts_with("caring"),
+         -c(country)) %>%
+  mutate(LocalLD=case_when(
+    region %in% c(2, 3, 5, 6) ~ 1,
+    TRUE ~ 0
+      )) %>%
+  filter(!(region %in% c(2, 3, 6)))
+
+df_complete <- left_join(df_bl_region, 
+                         df_sv_comp, 
+                         by="record_id") %>%
+  select(-c(wave, wave_name)) %>%
+  filter(!is.na(date)) %>%
+  filter(date < "2020-10-15") %>%
+  mutate(days=as.numeric(date-min(date)))                 # End of local LD
+
+get_date <- function(df, dates){
+  date <- df %>%
+    filter(date == dates) %>%
+    select(days) %>%
+    pull() %>%
+    `[[`(1)
+  return(date)
+}
+
+date_5 <- get_date(df_complete, "2020-07-04")
+
+df_complete_d <- df_complete %>%
+  mutate(first.treat = 
+           case_when(
+             (region == 5) ~ date_5,
+             TRUE ~ 0),
+         Post = 
+           case_when(
+             (region == 5) & (date>=date_5) ~ 1,
+             TRUE ~ 0),
+         Treat = 
+           case_when(
+             (region == 5) ~ 1,
+             TRUE ~ 0), 
+         time_to_treat =
+           ifelse(
+             Treat == 1, 
+             days - first.treat, 
+             0)  
+         )
+
+df_complete_w <- df_complete %>%
+  mutate(weeks = as.numeric(days) %/% 7 + 1)
+
+date_5 <- df_complete_w %>% 
+  filter(date=="2020-07-04") %>% 
+  select(weeks) %>% 
+  pull() %>% 
+  `[[`(1)
+
+df_complete_w <- df_complete_w %>%
+  mutate(first.treat = 
+           case_when(
+             (region == 5) ~ date_5,
+             TRUE ~ 0
+             ),
+         Treat = 
+           case_when(
+             (region == 5) ~ 1,
+             TRUE ~ 0
+             ),
+         Post = 
+           case_when(
+             (region == 5) & (weeks>=date_5) ~ 1,
+             TRUE ~ 0
+             ),
+         time_to_treat = 
+           ifelse(Treat == 1, 
+                  weeks - first.treat, 
+                  0)
+         )
+
+```
+
+
+```{r}
+df_complete_w$education  <- factor(df_complete_w$education)
+df_complete_w$gender     <- factor(df_complete_w$gender)
+df_complete_w$ethnic     <- factor(df_complete_w$ethnic)
+df_complete_w$employment <- factor(df_complete_w$employment)
+
+
+# Depression
+mod_twfe_dps_w <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) |
+                          #age + gender + ethnic + education + employment + exercise |
+                          record_id + weeks,   ## FEs
+                        data = df_complete_w)
+
+mod_sa_dps_w <- feols(dps_idx ~ sunab(first.treat, weeks) | 
+                        #age + gender + ethnic + education + employment + exercise|
+                        record_id + region + weeks,   ## FEs
+                    data = df_complete_w)
+
+# Anxiety
+mod_twfe_axy_w <- feols(axy_idx ~ i(time_to_treat, Treat, ref=-1) |
+                          #age + gender + ethnic + education + employment + exercise|
+                          record_id + weeks,   ## FEs
+                        data = df_complete_w)
+
+mod_sa_axy_w <- feols(axy_idx ~ sunab(first.treat, weeks) | 
+                        # age + gender + ethnic + education + employment + exercise|
+                        record_id + region + weeks,   ## FEs
+                    data = df_complete_w)
+
+
+# Parallel Trends
+## Depression Index
+par(cex=0.9, font.main=1)  # cex < 1 will reduce font size; font.main = 1 will make title normal (not bold)
+
+iplot(list(mod_twfe_dps_w, mod_sa_dps_w), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Weeks since treatment',
+      ylab = 'Average effect (std. dev.)',
+      main = 'Event Study For Leicester Region Treatment (Depression Index)')
+
+legend("bottomleft", 
+       col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE OLS", "Sun & Abraham (2020)"),
+       cex = 0.9) 
+
+## Anxiety Index
+iplot(list(mod_twfe_axy_w, mod_sa_axy_w), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Weeks since treatment',
+      ylab = 'Average effect (std. dev.)',
+      main = 'Event Study For Leicester Region Treatment (Anxiety Index)')
+
+legend("bottomleft", 
+       col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE OLS", "Sun & Abraham (2020)"),
+       cex = 0.9)
+
+
+mod_dps_w <- feols(dps_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                 record_id + weeks,   ## FEs
+               data = df_complete_w)
+
+mod_dps_w_reg <- feols(dps_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                 record_id + weeks + region,   ## FEs
+               data = df_complete_w)
+
+mod_dps_w_reg_rc <- feols(dps_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                  weeks + region,   ## FEs
+               data = df_complete_w)
+
+
+mod_axy_w <- feols(axy_idx ~ Post +
+                     age + gender + ethnic + education + employment + exercise |
+                     record_id + weeks,   ## FEs
+                   data = df_complete_w)
+
+mod_axy_w_reg <- feols(axy_idx ~ Post +
+                     age + gender + ethnic + education + employment + exercise |
+                     record_id + weeks + region,   ## FEs
+                   data = df_complete_w)
+
+mod_axy_w_reg_rc <- feols(axy_idx ~ Post +
+                 age + gender + ethnic + education + employment + exercise|
+                  weeks + region,   ## FEs
+               data = df_complete_w)
+
+etable(mod_twfe_dps_w, mod_twfe_axy_w,
+       cluster="weeks",
+       tex=TRUE)
+
+
+etable(mod_dps_w, mod_dps_w_reg, mod_dps_w_reg_rc,
+       mod_axy_w, mod_axy_w_reg, mod_axy_w_reg_rc,
+       cluster = "weeks",
+       tex = TRUE)
+```
+
+
+
+
+

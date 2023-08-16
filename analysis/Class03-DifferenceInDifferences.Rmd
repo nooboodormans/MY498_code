@@ -1,0 +1,440 @@
+---
+title: "MY457/MY557: Causal Inference for Experimental and Observational Studies"
+subtitle: "Class 3: Difference in Differences"
+author: ""
+date: ''
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,warning=F,message=F}
+# read in required packages
+# install.packages("plm") # Uncomment and run (once) if not already installed
+# ... similarly for the other packages if needed
+
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(markdown)
+library(plm)
+```
+
+#######################################################################################################
+# 1. In-class exercise: Examples of different types of analysis
+
+In this part of the exercise we show examples of how basic difference-in-differences estimators and more general fixed effects estimators that were discussed in the lecture in week 5 can be implemented in R. This is done using a single simulated dataset, for demonstration purposes. The comments on each of the methods are fairly limited, so some of the R steps may seem a little mysterious. Please refer to the help files of the functions, and ask me during the computer class. 
+
+```{r}
+# Data (actually the same sim_data that will be generated again later in the class exercise)
+sim_data <- readRDS("simdata1.rds")
+print(sim_data,n=30) # Showing what the data look like
+```
+
+Let us first consider the simple difference-in-differences setting where we have observations in two periods, before and after the intervention for some units.
+
+Consider first the estimation formulated as difference-in-differences, first estimated explicitly using differences of means and then, equivalently, implemented using linear regression modelling a few different ways. 
+
+*Note*: These estimators do not formally require actual panel (longitudinal) data for the same units, but can be calculated even when we have separate samples of units from the same population in the two periods. But then we need in effect to further assume that the composition of units in that population has not changed in any relevant way between the periods. 
+
+```{r}
+
+############################################################################################################
+# First illustration: Suppose we had only observed data just before and after the intervention (periods 7 and 8)
+sdata2 <- sim_data[sim_data$t==7 | sim_data$t==8,] 
+print(sdata2,n=20) # Here observations3, 5, 9 and 10 received the treatment between periods 7 and 8
+
+# Difference-in-differences estimator of the treatment effect
+
+## Calculated explicitly as difference-in-differences (of means)
+
+(mean(sdata2[sdata2$t==8 & sdata2$g==1,]$y)-mean(sdata2[sdata2$t==8 & sdata2$g==0,]$y))-
+  (mean(sdata2[sdata2$t==7 & sdata2$g==1,]$y)-mean(sdata2[sdata2$t==7 & sdata2$g==0,]$y))
+
+## More conveniently, calculated using different regerssion formulations:  
+###
+sdata2 <- sdata2 %>% mutate(y_diff = y - dplyr::lag(y))
+tail(sdata2)
+summary(lm(y_diff~g,data=sdata2,subset=(t==8)))
+###
+summary(lm(y~g*t8,data=sdata2))
+###
+summary(lm(y~g+t8+d1,data=sdata2))
+
+```
+
+
+Consider then the same estimation using a fixed-effects model with fixed effects for the individual units (and times). This does require panel data for (at least some) units.
+
+```{r}
+## Estimated using a fixed-effects regression model with fixed effects for the 500 individual units (and 2 times) 
+
+### Explicitly as a linear model with dummy variables for the units
+lm.fe.model <- lm(y~factor(id)+factor(t)+d1,data=sdata2)
+lm.fe.model
+summary(lm.fe.model)$coefficients[499:502,] # Estimated unit fixed effects for two units, time effect and treatment effect
+
+### Using a dedicated function for fixed effects estimation (from the plm package). 
+### This deals with the unit fixed effects without actually 
+### having to estimate them (but can show them afterwards) 
+fe.model <- plm(y~factor(t)+d1,data=sdata2,index=c("id","t"),model="within",effect="individual")
+summary(fe.model) # This displays only the estimated time and treatment effects
+
+fixef(fe.model,effect="individual",type="dfirst")[498:499] # These are the unit fixed effects, with that of unit 1 fixed at 0
+fixef(fe.model,effect="individual",type="dmean")[499:500] # These are the unit fixed effects, with their average constrained to be 0
+
+```
+
+The ideas and methods of fixed-effects estimation can also be used with more general structures of panel data (see the lecture for more on this). To illustrate this, let us use the dataset with all ten periods included:
+
+```{r}
+############################################################################################################
+# Second illustration: Using data on all 10 periods. 
+# Note: In this dataset the intervention still happens (if it does) only once, and always between periods 7 and 8.
+# However, the fixed effects model could also be fitted to datasets with other patterns of observation. 
+
+## Fixed effects model, with separate fixed effect for each time
+fe10.model <- plm(y~factor(t)+d1,data=sim_data,index=c("id","t"),model="within",effect="individual")
+summary(fe10.model) # This displays only the estimated time and treatment effects
+
+## Same, but estimated so that we can see the estimated fixed effects for each time
+fe10B.model <- plm(y~d1,data=sim_data,index=c("id","t"),model="within",effect="twoways") # The "twoways" means that time effects are also included as fixed effects
+summary(fe10B.model) 
+
+fixef(fe10B.model, effect="time", type="dfirst") # Estimated time effects as differences to first period
+fixef(fe10B.model, effect="time", type="level")  # Estimated time effects for each period
+
+## Same model,but fitted using lm
+lm.fe10A.model <- lm(y~factor(id)+factor(t)+d1,data=sim_data)
+summary(lm.fe10A.model)$coefficients[-(2:500),] 
+
+## Instead of separate time effects for each period, we can also fit more parsimonious functions of time. 
+## Here linear and quadratic time effects. 
+## Note: This is just for illustration. We skip an examination of whether these smooth forms of time dependence are ## actually adequate here. 
+
+lm.fe10lin.model <- lm(y~factor(id)+t+d1,data=sim_data)
+summary(lm.fe10lin.model)$coefficients[-(2:500),] 
+lm.fe10quad.model <- lm(y~factor(id)+t+I(t^2)+d1,data=sim_data)
+summary(lm.fe10quad.model)$coefficients[-(2:500),]  
+
+############################################################################################################
+
+```
+
+
+
+#######################################################################################################
+# 2. Further in-class exercise and demonstration 
+
+*Note*: This part of the exercise is from 2021. I expect that we will not have time to go through it (or all of it) during the class.But it provides very useful additional information and demonstration, so I have left it here for your self-study.  
+
+Here we will use a set of simulated panel data with an exogenous intervention to illustrate the various ways that difference-in-difference estimates can be obtained. This is the same simulated dataset which was used in part 2 above. The initial exploration here give more information about those data, and the estimation then repeats some of the same methods results we demonstrated above.
+
+Learning objectives:
+
+* Understand the data structures and variable codings required to obtain a difference-in-difference estimate
+* Understand why different estimators lead to similar or even identical estimates of the difference-in-differences results
+* Understand how to interpret the difference-in-differences estimate
+* Understand how to use lags and leads to explore the parallel trends assumption
+
+First, we will load in some required packages:
+
+
+## Causal identification under selection on *un*observables
+
+Recall that in the potential outcomes framework, we are almost always using a strategy aimed at characterizing the form that the counterfactuals take in order to identify a causal relationship. This will almost always involve making an argument about the data generating proces that led to the observed distribution of the treatment indicator. Randomization is one such argument that gives us causal identification via independence between treatment and potential outcomes. Selection-on-observables is another such argument that gives us causal identification via conditional independence between treatment and potential outcomes.
+
+The motivation for selection on *un*observables arises when we do not have randomization, and we do not have a good argument for conditional independence because there is an unobserved factor that is associated with selection into treatment and control. Because such a factor is unobserved, at first glance it may seem as if there is nothing that we can do. But we may be able to exploit some feature of the design setting to render the effects of unobserved factors impotent.
+
+Difference in differences is a particular strategy that becomes available when some minimum data requirements are satisfied, and we believe in the veracity of an untestable assumption. Specifically, when we observe trends in an outcome over time, and an exogenous intervention that affects some units but not others, it is reasonable to think that unobserved factors may contribute to both baseline differences between units in the treatment and control groups, as well as natural change over time. But such a situation allows us to exploit a simple trick to eliminate the effects of the unobserved factor and isolate the effect of the intervention on the outcome, if we believe that in the absence of the intervention, the treated units would have behaved exactly like the control units (the so-called *parallel trends assumption*). If we have outcome measurements in at least one pre-intervention and one post-intervention time period and the intervention assigns some units to treatment and some to control, and if we believe the parallel trends assumption holds, then the difference-in-difference estimate gives us the average treatment effect on the treated (*ATT*).
+
+## Different ways of estimating the ATT from a difference in difference procedure
+
+Now we will simulate some data to illustrate how various ways of calculating the difference-in-differences estimate lead to the same results. We focus on the simplest difference-in-differences setting in which all units receive the intervention at the same time. However, in this example we observe cases over ten time periods, setting up the ability to explore the longer time trend for the purpose of assessing the quality of the parallel trends assumption.
+
+Begin by setting the seed so that any random process in your code is reproducible.
+```{r}
+# set seed
+set.seed(71036)
+```
+
+Then we generate a sample of size $N=500$, each observed over 10 time periods, with potential outcomes $Y_{0}$ and $Y_{1}$ constructed as a linear function of unit-specific random variation, experimental group-specific fixed effects, and time-specific trends. Furthermore, let us assume that a random exogenous treatment occurs between time period 7 and time period 8.
+
+Specifically, we imagine that $Y_{0}$ is generated by:
+
+$Y_{0it} = \beta_{0}+\gamma*g + \lambda_{t}*s_{t} + \epsilon_{it}$,
+
+where $i=1,\ldots,500$ indexes units, $t=1,\ldots,10$ indexes time periods, $g$ is a dummy indicator for whether a unit is treated by the intervention, $s_{2},\ldots,s_{10}$ are dummy indicators for time periods $2,\ldots,10$, and $\epsilon_{it}$ is random error term (in this case, distributed normally with a mean of 0 and standard deviation of 10).
+
+$Y_{1it}$ is then generated as $Y_{1it}=Y_{0it}+\bar{Y}_{0}+\varepsilon_{it}$, where $\varepsilon_{it}$ is a random error term distributed normally with a mean of 0 and standard deviation of 1.
+
+```{r}
+# sample size
+N <- 500
+
+# randomly assigned treatment indicator
+g <- sample(0:1, N, replace = TRUE)
+
+# id placeholder
+id <- 1:N
+
+# time periods
+t <- c(rep(1, N), rep(2, N), rep(3, N), rep(4, N), rep(5, N), rep(6, N),
+       rep(7, N), rep(8, N), rep(9, N), rep(10, N))
+
+# put into dataframe
+sim_data <- cbind(id = rep(id, 10), t, g = rep(g, 10)) %>% as_tibble()
+
+# add time period dummy variables
+sim_data <- sim_data %>%
+  mutate(t1 = if_else(t == 1, 1, 0), t2 = if_else(t == 2, 1, 0),
+         t3 = if_else(t == 3, 1, 0), t4 = if_else(t == 4, 1, 0),
+         t5 = if_else(t == 5, 1, 0), t6 = if_else(t == 6, 1, 0),
+         t7 = if_else(t == 7, 1, 0), t8 = if_else(t == 8, 1, 0),
+         t9 = if_else(t == 9, 1, 0), t10 = if_else(t == 10, 1, 0))
+
+# parameters for equation to generate simulated outcomes
+b0 <- 5
+gamma <- 5
+lambda_t_minus5 <- 1
+lambda_t_minus4 <- 3
+lambda_t_minus3 <- -2
+lambda_t_minus2 <- -3
+lambda_t_minus1 <- 4
+lambda_t_0 <- 1
+lambda_t_1 <- 2
+lambda_t_2 <- -3
+lambda_t_3 <- 3
+
+# generate y0
+y0_panel <- b0 + gamma * sim_data$g + lambda_t_minus5 * sim_data$t2 +
+  lambda_t_minus4 * sim_data$t3 + lambda_t_minus3 * sim_data$t4 +
+  lambda_t_minus2 * sim_data$t5 + lambda_t_minus1 * sim_data$t6 +
+  lambda_t_0 * sim_data$t7 + lambda_t_1 * sim_data$t8 +
+  lambda_t_2 * sim_data$t9 + lambda_t_3 * sim_data$t10 + rnorm(N * 10)
+
+# generate y1
+y1_panel <- y0_panel + mean(y0_panel) + rnorm(N)
+
+# add y0, y1, and treatment indicator to dataframe
+sim_data <- sim_data %>%
+  mutate(y0 = y0_panel, y1 = y1_panel, d1 = if_else(g == 1 & t >= 8, 1, 0))
+
+# generate y as y0 when d1 = 0 and y1 when d1 = 1
+sim_data <- sim_data %>% mutate(y = if_else(d1 == 1, y1, y0))
+
+# sort data into standard panel format
+sim_data <- sim_data %>% arrange(id, t)
+```
+
+Now we can plot the trend lines for the the means of $Y$ by experimental group.
+```{r}
+# plot data
+avg_lineplot_sim_data <- sim_data %>% group_by(t, g, d1) %>%
+  summarize(y = mean(y)) %>%
+  mutate(group = if_else(g == 0, "Control", "Treatment"))
+
+p1 <- ggplot(avg_lineplot_sim_data, aes(x = t, y = y, group = group)) +
+  geom_vline(xintercept = 7.5, color = 'black') +
+  geom_segment(x = 6.4, y = 20, xend = 7.4, yend = 20,
+               arrow = arrow(length = unit(.1, "inches"))) +
+  annotate("text", x = .62, y = 20, label = "Intervention (Treatment)", hjust = -.6) +
+  geom_line(aes(color = group)) + geom_point(aes(color = group)) +
+  scale_x_continuous(breaks = 1:10) +
+  labs(x = "Time Period", color = "Experimental Group")
+p1
+```
+
+We see that, as should be the case, the two experimental groups start from different baselines, then experience over-time trends that largely mirror one another, then diverge when the intervention comes into play. In other words, the simulated data sets up an ideal situation for analyzing treatment effects using difference-in-differences. For the illustrations that follow, recall that the difference-in-differences procedure, in combination with the parallel trends assumption, produces the *ATT*. Therefore, our benchmark is the true *ATT*:
+```{r}
+true_att <- mean(sim_data[sim_data$t == 8 & g == 1, ]$y1) -
+            mean(sim_data[sim_data$t == 8 & g == 1, ]$y0)
+true_att
+```
+
+Now we consider the various ways that the difference-in-differences estimate can be calculated, given the data structure. Since the intervention takes effect for all units in the treatment group at the same time, we can first ignore the fact that we have multiple pre-intervention and post-intervention observations. In other words, just focusing on the minimum data requirements, we can simply examine the data at the final pre-intervention time period as compared to the first post-intervention time period (usually denoted as $t=0$ and $t=1$, respectively).
+```{r}
+p2 <- ggplot(avg_lineplot_sim_data, aes(x = t, y = y, group = group)) +
+  geom_vline(xintercept = 7.5, color = 'black') +
+  geom_vline(xintercept = 7, color = 'black', lty = 2) +
+  geom_vline(xintercept = 8, color = 'black', lty = 2) +
+  geom_segment(x = 6.4, y = 20, xend = 7.4, yend = 20,
+               arrow = arrow(length = unit(.1, "inches"))) +
+  annotate("text", x = .62, y = 20, label = "Intervention (Treatment)",
+           hjust = -.6) +
+  annotate("text", x = 7, y = 10, label = "t = 0", hjust = 1.1) +
+  annotate("text", x = 8, y = 10, label = "t = 1", hjust = -.1) +
+  geom_line(aes(color = group)) + geom_point(aes(color = group)) +
+  scale_x_continuous(breaks = 1:10) +
+  labs(x = "Time Period", color = "Experimental Group")
+p2
+```
+
+We can begin by simply performing the difference-in-differences calculation by hand. For this, we have two options:
+
+1. Take the average difference between treatment and control in the post-intervention period, the average difference between treatment and control in the pre-intervention period, and the difference between these two differences; or
+2. Take the average difference between treated units in the post-intervention period and treated units in the pre-intervention period, the average difference between control units in the post-intervention period and control units in the pre-intervention period, and the difference between these two differences.
+
+If you are not already convinced, at this point convince yourself that these calculations are indeed identical.
+```{r}
+# treatment-control differences post, treatment-control differences pre, and the
+#   difference between them
+treat_control_pre_diff <-
+  mean(sim_data[sim_data$t == 7 & sim_data$g == 1, ]$y) -
+  mean(sim_data[sim_data$t == 7 & sim_data$g == 0, ]$y)
+treat_control_post_diff <-
+  mean(sim_data[sim_data$t == 8 & sim_data$g == 1, ]$y) -
+  mean(sim_data[sim_data$t == 8 & sim_data$g == 0, ]$y)
+did_est01 <- treat_control_post_diff - treat_control_pre_diff
+
+# treatment group pre-post differences, control group pre-post differences, and
+#   the difference between them
+treat_post_pre_diff <-
+  mean(sim_data[sim_data$t == 8 & sim_data$g == 1, ]$y) -
+  mean(sim_data[sim_data$t == 7 & sim_data$g == 1, ]$y)
+control_post_pre_diff <-
+  mean(sim_data[sim_data$t == 8 & sim_data$g == 0, ]$y) -
+  mean(sim_data[sim_data$t == 7 & sim_data$g == 0, ]$y)
+did_est02 <- treat_post_pre_diff - control_post_pre_diff
+
+# difference-in-difference hand calculations
+did_est01
+did_est02
+```
+
+In addition to being identical to one another, these calculations are identical to three different versions of a regression estimate of the difference-in-differences *ATT*. Specifically, we should get identical estimates as the hand calculations from each of the following:
+
+1. $Y=\mu+\gamma*g+\delta*t+\alpha*g*t+\varepsilon$,
+2. $Y=\mu+\gamma*g+\delta*t+\alpha*D+\varepsilon$, and
+3. $\Delta Y=\mu+\alpha*\Delta D$,
+
+where $g$ is defined as above, $t=0$ in the pre-intervention period and $t=1$ in the post-intervention period, $D=1$ for treated units in the post-intervention period and 0 otherwise, and the $\Delta$ notation indicates having taken the first difference, such that $\Delta Y=Y_{t=1}-Y_{t=0}$ and $\Delta D=1$ for treated cases and 0 for control cases. In all cases, the coefficient estimate for $\alpha$ will represent the *ATT*.
+
+```{r}
+## regressions based on panel format
+# 1.
+did_reg_panel01 <-
+  lm(y ~ g*t8, data = sim_data[sim_data$t %in% c(7, 8), ])
+# 2.
+did_reg_panel02 <-
+  lm(y ~ g + t8 + d1, data = sim_data[sim_data$t %in% c(7, 8), ])
+
+## regression based on first differences
+# 3.
+sim_data <- sim_data %>% mutate(y_diff = y - dplyr::lag(y, 1))
+did_reg_firstdiff <- lm(y_diff ~ d1, data = sim_data[sim_data$t == 8, ])
+
+summary(did_reg_panel01)
+summary(did_reg_panel02)
+summary(did_reg_firstdiff)
+```
+
+The next natural question is how we can exploit the additional information from the multiple pre-intervention periods. Keeping in mind that there is no direct test of the parallel trends assumption, observations at pre-intervention time points can provide some additional evidence in favor of parallel trends between treated and control observations. This essentially involves performing a series of placebo tests (comparisons between future treated and untreated cases) at each of the two-period time trends before the intervention comes into effect. In this case, it would take the form of placebo tests at time periods 1 and 2, 2 and 3, 3 and 4, 4 and 5, 5 and 6, 6 and 7, and then a calculation of the treatment effect between time periods 7 and 8, followed by post-intervention tests of the persistence of the treatment effect.
+
+Specifically, we would estimate a model like the following:
+
+$Y=\mu+\gamma*g+\lambda_{t}*s_{t}+\\\hspace{7mm}\alpha_{-6}*g*s_{2}+\alpha_{-5}*g*s_{3}+\alpha_{-4}*g*s_{4}+\alpha_{-3}*g*s_{5}+\alpha_{-2}*g*s_{6}+\alpha_{-1}*g*s_{7}+\alpha_{0}*g*s_{8}+\alpha_{1}*g*s_{9}+\alpha_{2}*g*s_{10}$
+
+In this formulation, the coefficient estimates for $\alpha_{-6},\ldots,\alpha_{-1}$ are placebo tests for all of the pre-intervention periods, while $\alpha_{0}$ is the *ATT*, and $\alpha_{1}$ and $\alpha_{2}$ are estimates of the post-intervention persistence effects. If this is to serve as evidence in favor of the parallel trends assumption, we should find a series of null effects for all of the placebo tests. In general, there is no expectation about the coefficient estimates capturing persistence effects (though in these simulated data, $Y_{1}$ was drawn for treated cases in all post-intervention periods, indicating persistence).
+```{r}
+# inclusion of lags and leads to test parallel trends
+did_reg_laglead <-
+  lm(y ~ g*t2 + g*t3 + g*t4 + g*t5 + g*t6 + g*t7 + g*t8 + g*t9 + g*t10,
+     data = sim_data)
+summary(did_reg_laglead)
+```
+As expected the placebo tests all produce null results, indicating no differences in the trends in the pre-intervention periods, a result that would be helpful for convincing ourselves that the parallel trends assumption is reasonable.
+
+We see that the treatment effect calculation, $\alpha_{0}$, for the interaction between $g$ and $s_{8}$ is close, but not exactly the same as the previous calculations. This difference is due to the fact that the regression is now estimating the treatment effect after controlling for differences in time trends across the ten time periods.
+
+The purpose here has basically been to demonstrate that there are many ways to estimate a difference-in-difference treatment effect depending on the data structure and the preferences of the researcher. This is important for illustrative purposes. But most important is to always keep in mind that, though the mathematics and minimum data requirements necessary to obtain a difference-in-difference estimate are quite simple, our ability to interpret that estimate as an *ATT* rests solely on the quality of the parallel trends assumption. If parallel trends does not hold, we have no way of characterizing counterfactuals, and hence no way of eliminating potential competing explanations. Examining pre-intervention placebo tests is the best indirect test we have at our disposal when we have multiple pre-intervention periods, it is not a direct test of parallel trends. And, indeed, there is no direct test of parallel trends.
+
+# Homework Assignment: The Impact of Minimum Wage on Teenage Employment
+
+Classical economic theory states that raises in minimum wages hurt employment, especially teenage employment since teenage wages are often set at the minimum wage. Such is the main argument of those who oppose raising minimum wages. In this exercise, we are going to put this economic theory to test by exploiting a natural experiment in New Jersey and Pennsylvania. In 1992, New Jersey’s minimum wage increased from \$4.25 to \$5.05 while the minimum wage in Pennsylvania remained at \$4.25. In their seminal study, Card and Krueger (1994) used data on employment at fast-food establishments in New Jersey and Pennsylvania before and after the increase in the minimum wage to measure the impact of the increase in minimum wage on teenage employment.
+
+The units is here a fast-food restaurant, and the populations of them that we consider are these groups of such restaurants in Pennsylvania and New Jersey. The causal effect of interest is the effect of increase of minimum wage on employment among the New Jersey restaurants.  
+
+The following variables are included in the `CardKrueger.csv` dataset from the Card and Krueger (1994) paper. You can find the paper itself on the MY457 Moodle page, under week 5.
+
+Variable Name | Variable Description
+------------- | ----------------------------------------------------------------
+`emptot`      | Full-time Equivalent (FTE) Employment Before Minimum Wage Increase in New Jersey: count of number of full-time workers plus 0.5 times the count of the number of part-time workers
+`emptot2`     | Full-time Equivalent (FTE) Employment After Minimum Wage Increase in New Jersey: count of number of full-time workers plus 0.5 times the count of the number of part-time workers
+`nj`          | 1 if NJ; 0 if PA (Treatment Indicator)
+`pa`          | 1 if PA; 0 if NJ (Control Indicator)
+`southj`      | 1 if in southern NJ (Subset of Treated Cases)
+`centralj`    | 1 if in central NJ (Subset of Treated Cases)
+`pa1`         | 1 if in PA, northeast suburbs of Philadelphia (Subset of Control Cases)
+`pa2`         | 1 if in PA, Easton, etc. (Subset of Control Cases)
+`wage_st`     | Starting Wage (\$/hr) Before Minimum Wage Increase in New Jersey
+`wage_st2`    | Starting Wage (\$/hr) After Minimum Wage Increase in New Jersey
+`hrsopen`     | Hours Open Weekday Before Minimum Wage Increase in New Jersey
+`hrsopen2`    | Hours Open Weekday After Minimum Wage Increase in New Jersey
+`bk`          | 1 if Burger King; 0 Otherwise
+`kfc`         | 1 if KFC; 0 Otherwise
+`roys`        | 1 if Roy Rogers; 0 Otherwise
+`wendys`      | 1 if Wendys; 0 Otherwise
+`pmeal`       | Price of Full Meal Before Minimum Wage Increase in New Jersey
+`pmeal2`      | Price of Full Meal After Minimum Wage Increase in New Jersey
+`closed`      | Closed Permanently After Minimum Wage Increase in New Jersey
+`co_owned`    | 1 if company owned; 0 Otherwise
+
+**Preliminaries**
+
+These are panel data, but the data are formatted in a "wide" form where the two observations for the same restaurant are in different columns (variables) on the same row of the data.To employ the kinds of models we introduced above it is necessary to first convert the data into a "long" format which has one row per period per restaurant. The code below shows how this can be done.
+
+```{r}
+ckdata <- read.csv('CardKrueger.csv', stringsAsFactors = FALSE)
+tail(ckdata)
+
+ckdata2 <- reshape(ckdata,direction="long",
+      varying=list(c("emptot","emptot2"),c("wage_st","wage_st2"), 
+                   c("hrsopen","hrsopen2"),c("pmeal","pmeal2")),
+        v.names=c("emptot","wage_st","hrsopen","pmeal"),
+      idvar="restaurant",ids=as.numeric(rownames(ckdata)))
+ckdata2 <- ckdata2[order(ckdata2$restaurant,ckdata2$time),]
+ckdata2$timepost <- as.numeric(ckdata2$time==2)
+ckdata2$treated <- ckdata2$nj*ckdata2$timepost
+tail(ckdata2)
+
+```
+
+**Q1.** The homework this time is short and simple. Calculate the difference-in-differences estimate of the effect of the increase in minimum wage on FTE employment in these restaurants in New Jersey. Calculate this estimator both using a linear-regression formulation which does not use a fixed-effects formulation of the analysis, and using a fixed-effects model. 
+
+Check that your results match that reported in Table 3 (row 4) of Card and Krueger (1994). What is the substantive conclusion from these results?
+
+*Note 1*: The estimated standard errors of your estimated effects will be different from the ones in the paper. For the linear-model estimator this is because it assumes homoscedasticity (constant residual variance) within each cell defined by a combination of state and period, while the estimates in the paper (which are derived using basic formulas for differences of sample means) allow these variances to be different from each other. The standard errors from the fixed effects model (or a linear model for first differences) are here substantially smaller than the standard errors from the linear regression models (apart from the first-differences model). This is because by controlling for the individual fixed effects this model reflects the fact that we actually have panel data of individual restaurants (i.e. the estimation effectively uses within-restaurant differences over time rather than differences of group means). Here the values of employment vary much more between than within restaurants, so controlling for the between-restaurant variation with the fixed effects substantially increases the precision of the estimates. 
+
+```{r}
+# A linear model for the grouped data
+summary(lm(emptot~nj*timepost,data=ckdata2))
+
+# A linear model for first differences
+ckdata2 <- ckdata2 %>% 
+  mutate(y_diff = emptot - dplyr::lag(emptot))
+
+ckdata2
+ckdata2 %>% filter(treated==1)
+
+summary(lm(y_diff~nj,
+           data=ckdata2,
+           subset=(time==2))
+        )
+
+# A fixed effects model 
+summary(plm(emptot~treated,data=ckdata2,
+            index=c("restaurant","time"),
+            model="within",
+            effect="twoways"))
+```
+
+
+
+*Note 2*: The answer document for the homework also includes some further analysis of these data (from a previous round of teh course in 2021) to give you further examples of such analyses. It is not part of the homework. 
+
+

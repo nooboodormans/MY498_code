@@ -1,0 +1,398 @@
+---
+title: "Leicester with Not Yet Treated"
+subtitle: "Actual"
+author: ""
+date: ''
+output:
+  pdf_document: default
+  html_document: default
+---
+# Setup
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,warning=F,message=F}
+# read in required packages
+# install.packages("plm") # Uncomment and run (once) if not already installed
+# ... similarly for the other packages if needed
+# install.packages("huxtable")
+
+library(huxtable)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(markdown)
+library(plm)
+library(did)
+library(fixest)
+```
+
+
+```{r}
+# read the data
+df_bl <- read.csv("../data/baseline.csv")
+df_sv <- read.csv("../data/survey.csv")
+```
+
+
+```{r}
+
+# define each columns
+sv_column <- list('record_id', 'wave', 'wave_name', 'date',  ## Data info
+                 'soc1', 'soc2', 'soc3', 'soc4', 
+                 'phq1', 'phq2', 'phq3', 'phq4', 'phq5', 'phq6', 'phq7', 'phq8', 'phq9', ## depression index
+                 'gad1', 'gad2', 'gad3', 'gad4','gad5', 'gad6','gad7') ## Anxiety index
+
+df_sv_mod <- df_sv %>% select(!!! sv_column)
+df_sv_mod_filtered <- df_sv_mod %>% filter(!is.na(date) & date != " " & !is.na(soc1)) 
+
+df_sv_mod_filtered$date <- as.Date(df_sv_mod_filtered$date, format="%m/%d/%Y")
+df_sv_comp <- df_sv_mod_filtered %>% 
+  mutate(dps_idx = phq1 + phq2 + phq3 + phq4 + phq5 + phq6 + phq7 + phq8 + phq9,
+         axy_idx = gad1 + gad2 + gad3 + gad4 + gad5 + gad6 + gad7) %>%
+  select(-starts_with("phq"),
+         -starts_with("gad"))
+
+df_sv_hm <- df_sv_comp %>% 
+  select(-c(wave, wave_name, soc1, soc2, soc3, soc4))
+
+df_bl_region <- df_bl[!is.na(df_bl$region), ] %>%
+  filter(country==1) %>%
+  select(-starts_with("keyworker"), 
+         -starts_with("garden"), 
+         -starts_with("illness"),
+         -starts_with("pets"),
+         -starts_with("caring"),
+         -c(country)) %>%
+  mutate(LocalLD=case_when(
+    region %in% c(2, 3, 5, 6) ~ 1,
+    TRUE ~ 0
+      )
+    )
+
+df_complete <- left_join(df_bl_region, 
+                         df_sv_comp, 
+                         by="record_id") %>%
+  select(-c(wave, wave_name)) %>%
+  filter(!is.na(date)) %>%
+  mutate(days=as.numeric(date-min(date))) %>% 
+  filter(date < "2020-07-24")                   # End of local LD
+
+get_date <- function(df, dates){
+  date <- df %>%
+    filter(date == dates) %>%
+    select(days) %>%
+    pull() %>%
+    `[[`(1)
+  return(date)
+}
+
+date_5 <- get_date(df_complete, "2020-07-04")
+
+df_complete_d <- df_complete %>%
+  mutate(first.treat = 
+           case_when(
+             (region == 5) ~ date_5,
+             TRUE ~ 0),
+         Post = 
+           case_when(
+             (region == 5) & (date>=date_5) ~ 1,
+             TRUE ~ 0),
+         Treat = 
+           case_when(
+             (region == 5) ~ 1,
+             TRUE ~ 0), 
+         time_to_treat =
+           ifelse(
+             Treat == 1, 
+             days - first.treat, 
+             0)  
+         )
+
+df_complete_w <- df_complete %>%
+  mutate(weeks = as.numeric(days) %/% 7 + 1)
+
+date_5 <- df_complete_w %>% filter(date=="2020-07-04") %>% select(weeks) %>% pull() %>% `[[`(1)
+
+df_complete_w <- df_complete_w %>%
+  mutate(first.treat = 
+           case_when(
+             (region == 5) ~ date_5,
+             TRUE ~ 0
+             ),
+         Treat = 
+           case_when(
+             (region == 5) ~ 1,
+             TRUE ~ 0
+             ),
+         Post = 
+           case_when(
+             (region == 5) & (date>=date_5) ~ 1,
+             TRUE ~ 0
+             ),
+         time_to_treat = 
+           ifelse(Treat == 1, 
+                  weeks - first.treat, 
+                  0)
+         )
+
+```
+
+# Checking for Parallel Trends
+- fixed effect: region + days
+- control: age + gender + ethnic + education + employment + exercise
+
+## Days
+```{r}
+# Depression
+mod_twfe_dps_d <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) +
+                          age + gender + ethnic + education + employment + exercise |
+                          region + days,   ## FEs
+                        data = df_complete_d)
+
+mod_sa_dps_d <- feols(dps_idx ~ sunab(first.treat, days) + 
+                        age + gender + ethnic + education + employment + exercise|
+                        region + days,   ## FEs
+                    data = df_complete_d)
+
+# Anxiety
+mod_twfe_axy_d <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) +
+                          age + gender + ethnic + education + employment + exercise|
+                          region + days,   ## FEs
+                        data = df_complete_d)
+
+mod_sa_axy_d <- feols(axy_idx ~ sunab(first.treat, days) + 
+                        age + gender + ethnic + education + employment + exercise|
+                        region + days,   ## FEs
+                    data = df_complete_d)
+
+
+# Parallel Trends
+## Depression Index
+iplot(list(mod_twfe_dps_d, mod_sa_dps_d), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Staggered Treatment of Local Lockdown (Depression Index)')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE", "Sun & Abraham (2020)"))
+
+## Anxiety Index
+iplot(list(mod_twfe_axy_d, mod_sa_axy_d), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Staggered Treatment of Local Lockdown (Anxiety Index)')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE", "Sun & Abraham (2020)"))
+```
+
+
+
+## Week
+```{r}
+df_complete_w$education  <- factor(df_complete_w$education)
+df_complete_w$gender     <- factor(df_complete_w$gender)
+df_complete_w$ethnic     <- factor(df_complete_w$ethnic)
+df_complete_w$employment <- factor(df_complete_w$employment)
+
+
+# Depression
+mod_twfe_dps_w <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) +
+                          age + gender + ethnic + education + employment + exercise |
+                          record_id + region + weeks,   ## FEs
+                        data = df_complete_w)
+
+mod_sa_dps_w <- feols(dps_idx ~ sunab(first.treat, weeks) + 
+                        age + gender + ethnic + education + employment + exercise|
+                        record_id + region + weeks,   ## FEs
+                    data = df_complete_w)
+
+# Anxiety
+mod_twfe_axy_w <- feols(axy_idx ~ i(time_to_treat, Treat, ref=-1) +
+                          age + gender + ethnic + education + employment + exercise|
+                          record_id + region + weeks,   ## FEs
+                        data = df_complete_w)
+
+mod_sa_axy_w <- feols(axy_idx ~ sunab(first.treat, weeks) + 
+                        age + gender + ethnic + education + employment + exercise|
+                        record_id + region + weeks,   ## FEs
+                    data = df_complete_w)
+
+
+# Parallel Trends
+## Depression Index
+iplot(list(mod_twfe_dps_w, mod_sa_dps_w), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Treatment Effect Until July 24th (Depression Index)')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE OLS", "Sun & Abraham (2020)"))
+
+## Anxiety Index
+iplot(list(mod_twfe_axy_w, mod_sa_axy_w), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Time to treatment',
+      main = 'Treatment Effect Until July 24th (Anxiety Index)')
+
+legend("bottomleft", col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE OLS", "Sun & Abraham (2020)"))
+
+
+mod_dps_w <- feols(dps_idx ~ Treat+
+                 age + gender + ethnic + education + employment + exercise|
+                 weeks,   ## FEs
+               data = df_complete_w)
+
+mod_axy_w <- feols(axy_idx ~ Treat+
+                     age + gender + ethnic + education + employment + exercise|
+                     weeks,   ## FEs
+                   data = df_complete_w)
+
+
+etable(mod_dps_w, mod_axy_w, cluster = "weeks")
+```
+
+# Moving Average
+```{r}
+# Making the function
+MA_calculate <- function(df, n) {
+  df <- df %>%
+    mutate(MovingAverageDays = as.numeric(days) %/% n + 1)
+  
+  date_5 <- df %>% 
+    filter(date=="2020-07-04") %>% 
+    select(MovingAverageDays) %>% 
+    pull() %>% `[[`(1)
+
+  df_MA  <- df %>%
+    mutate(first.treat = 
+             case_when(
+               (region == 5) ~ date_5,
+               TRUE ~ 0),
+           Treat = 
+             case_when(
+               (region == 5) ~ 1,
+               TRUE ~ 0
+               ),
+           Post = 
+             case_when(
+               (region == 5) & (MovingAverageDays>=date_5) ~ 1,
+               TRUE ~ 0
+               ),
+           time_to_treat =
+             ifelse(Treat == 1, 
+                    MovingAverageDays - first.treat, 
+                    0)
+         )
+  return(df_MA)
+}
+
+df_complete_MA3 <- MA_calculate(df_complete, 3)
+
+df_complete_MA3
+```
+```{r}
+df_complete_MA3 <- MA_calculate(df_complete, 7)
+
+df_complete_MA3$education  <- factor(df_complete_MA3$education)
+df_complete_MA3$gender     <- factor(df_complete_MA3$gender)
+df_complete_MA3$ethnic     <- factor(df_complete_MA3$ethnic)
+df_complete_MA3$employment <- factor(df_complete_MA3$employment)
+
+
+# Depression
+mod_twfe_dps_MA3 <- feols(dps_idx ~ i(time_to_treat, Treat, ref=-1) + 
+                            age + gender + ethnic + education + employment + exercise|
+                            record_id + MovingAverageDays,   ## FEs
+                        data = df_complete_MA3)
+
+mod_sa_dps_MA3 <- feols(dps_idx ~ sunab(first.treat, MovingAverageDays) + 
+                        age + gender + ethnic + education + employment + exercise|
+                        record_id + MovingAverageDays,   ## FEs
+                    data = df_complete_MA3)
+
+# Anxiety
+mod_twfe_axy_MA3 <- feols(axy_idx ~ i(time_to_treat, Treat, ref=-1) +
+                          age + gender + ethnic + education + employment + exercise|
+                          record_id + MovingAverageDays,   ## FEs
+                        data = df_complete_MA3)
+
+mod_sa_axy_MA3 <- feols(axy_idx ~ sunab(first.treat, MovingAverageDays) + 
+                        age + gender + ethnic + education + employment + exercise|
+                        record_id + MovingAverageDays,   ## FEs
+                    data = df_complete_MA3)
+
+
+# Parallel Trends
+## Depression Index
+par(cex=0.9, font.main=1)  # cex < 1 will reduce font size; font.main = 1 will make title normal (not bold)
+
+iplot(list(mod_twfe_dps_MA3, mod_sa_dps_MA3), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Weeks since treatment',
+      ylab = 'Average effect (std. dev.)',
+      main = 'Event Study Until July 24th (Depression Index)')
+
+legend("bottomleft", 
+       col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE OLS", "Sun & Abraham (2020)"),
+       cex=0.9)
+
+## Anxiety Index
+
+# Setting graphical parameters
+par(cex=0.9, font.main=1)  # cex < 1 will reduce font size; font.main = 1 will make title normal (not bold)
+
+iplot(list(mod_twfe_axy_MA3, mod_sa_axy_MA3), 
+      sep = 0.5, ref.line = -1,
+      xlab = 'Weeks since treatment',
+      ylab = 'Average effect (std. dev.)',
+      main = 'Event Study Until July 24th (Anxiety Index)')
+
+# Modifying the legend
+legend("bottomleft", 
+       col = c(1, 2), pch = c(20, 17), 
+       legend = c("TWFE OLS", "Sun & Abraham (2020)"),
+       cex = 0.9) 
+
+
+mod_dps_MA3 <- feols(dps_idx ~ Post +
+                       age + gender + ethnic + education + employment + exercise|
+                       record_id + MovingAverageDays + region,   ## FEs
+                     data = df_complete_MA3)
+
+mod_axy_MA3 <- feols(axy_idx ~ Post +
+                       age + gender + ethnic + education + employment + exercise|
+                       record_id + MovingAverageDays + region,   ## FEs
+                     data = df_complete_MA3)
+
+mod_dps_MA3_wor <- feols(dps_idx ~ Post +
+                       age + gender + ethnic + education + employment + exercise|
+                       record_id + MovingAverageDays,   ## FEs
+                     data = df_complete_MA3)
+
+mod_axy_MA3_wor <- feols(axy_idx ~ Post +
+                       age + gender + ethnic + education + employment + exercise|
+                       record_id + MovingAverageDays,   ## FEs
+                     data = df_complete_MA3)
+
+mod_dps_MA3_rc <- feols(dps_idx ~ Post +
+                       age + gender + ethnic + education + employment + exercise|
+                        MovingAverageDays,   ## FEs
+                     data = df_complete_MA3)
+
+mod_axy_MA3_rc <- feols(axy_idx ~ Post +
+                       age + gender + ethnic + education + employment + exercise|
+                         MovingAverageDays,   ## FEs
+                     data = df_complete_MA3)
+
+
+etable(mod_dps_MA3, mod_dps_MA3_wor, mod_dps_MA3_rc,
+       mod_axy_MA3, mod_axy_MA3_wor, mod_axy_MA3_rc,
+       cluster = "MovingAverageDays",
+       tex=TRUE)
+```
+
